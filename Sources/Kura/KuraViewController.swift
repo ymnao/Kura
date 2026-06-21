@@ -241,7 +241,7 @@ final class MenuItemRowView: NSTableCellView {
         addSubview(titleLabel)
 
         NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
         ])
@@ -249,5 +249,6 @@ final class MenuItemRowView: NSTableCellView {
 
     func configure(with item: MenuBarItem) {
         titleLabel.stringValue = item.title
+        titleLabel.textColor = item.element == nil ? .tertiaryLabelColor : .secondaryLabelColor
     }
 }

@@ -3,6 +3,14 @@ import ApplicationServices
 
 enum MenuBarScanner {
     static func scan(_ app: RegisteredApp) -> [MenuBarItem] {
+        let items = scanRaw(app)
+        if items.isEmpty {
+            return [MenuBarItem(title: "(メニュー項目なし)", element: nil)]
+        }
+        return items
+    }
+
+    private static func scanRaw(_ app: RegisteredApp) -> [MenuBarItem] {
         guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier).first else {
             return []
         }
@@ -28,7 +36,7 @@ enum MenuBarScanner {
     }
 
     private static func itemTitle(_ element: AXUIElement) -> String {
-        for attr in [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute] {
+        for attr in [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute, kAXRoleDescriptionAttribute] {
             if let value = copyAttribute(element, attr as String) as? String, !value.isEmpty {
                 return value
             }

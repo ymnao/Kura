@@ -3,5 +3,5 @@ import ApplicationServices
 
 struct MenuBarItem {
     let title: String
-    let element: AXUIElement
+    let element: AXUIElement?
 }
