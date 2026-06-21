@@ -1,9 +1,11 @@
 import AppKit
 
 final class KuraViewController: NSViewController {
-    private let listStack = NSStackView()
+    private let tableView = NSTableView()
     private let emptyLabel = NSTextField(labelWithString: "")
     private var observerToken: Any?
+
+    private static let cellId = NSUserInterfaceItemIdentifier("kura.appRow")
 
     override func loadView() {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 420))
@@ -19,18 +21,22 @@ final class KuraViewController: NSViewController {
         separator.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(separator)
 
-        listStack.orientation = .vertical
-        listStack.spacing = 4
-        listStack.alignment = .leading
-        listStack.distribution = .fill
-        listStack.translatesAutoresizingMaskIntoConstraints = false
+        tableView.headerView = nil
+        tableView.rowHeight = 30
+        tableView.gridStyleMask = []
+        tableView.selectionHighlightStyle = .none
+        tableView.backgroundColor = .clear
+        tableView.intercellSpacing = NSSize(width: 0, height: 2)
+        tableView.dataSource = self
+        tableView.delegate = self
+        tableView.addTableColumn(NSTableColumn(identifier: Self.cellId))
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
+        scrollView.documentView = tableView
         scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = listStack
         container.addSubview(scrollView)
 
         emptyLabel.stringValue = "蔵は空です\n\n右クリック → 設定… から\nアプリを納めてください"
@@ -51,14 +57,9 @@ final class KuraViewController: NSViewController {
             separator.heightAnchor.constraint(equalToConstant: 1),
 
             scrollView.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
-            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
-
-            listStack.topAnchor.constraint(equalTo: scrollView.topAnchor),
-            listStack.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor, constant: 8),
-            listStack.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: -8),
-            listStack.widthAnchor.constraint(equalTo: scrollView.widthAnchor, constant: -16),
 
             emptyLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
@@ -69,7 +70,7 @@ final class KuraViewController: NSViewController {
         view = container
 
         observerToken = NotificationCenter.default.addObserver(
-            forName: Settings.didChange, object: nil, queue: .main
+            forName: RegistrationStore.didChange, object: nil, queue: .main
         ) { [weak self] _ in
             self?.reload()
         }
@@ -87,59 +88,72 @@ final class KuraViewController: NSViewController {
     }
 
     private func reload() {
-        for v in listStack.arrangedSubviews {
-            listStack.removeArrangedSubview(v)
-            v.removeFromSuperview()
-        }
+        tableView.reloadData()
+        emptyLabel.isHidden = !RegistrationStore.shared.registeredApps.isEmpty
+    }
+}
 
-        let apps = Settings.shared.registeredApps
-        emptyLabel.isHidden = !apps.isEmpty
+extension KuraViewController: NSTableViewDataSource {
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        RegistrationStore.shared.registeredApps.count
+    }
+}
 
-        for app in apps {
-            listStack.addArrangedSubview(makeRow(for: app))
+extension KuraViewController: NSTableViewDelegate {
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let apps = RegistrationStore.shared.registeredApps
+        guard apps.indices.contains(row) else { return nil }
+
+        let cell: AppRowView
+        if let recycled = tableView.makeView(withIdentifier: Self.cellId, owner: self) as? AppRowView {
+            cell = recycled
+        } else {
+            cell = AppRowView()
+            cell.identifier = Self.cellId
         }
+        cell.configure(with: apps[row])
+        return cell
+    }
+}
+
+final class AppRowView: NSTableCellView {
+    private let iconView = NSImageView()
+    private let nameLabel = NSTextField(labelWithString: "")
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setup()
     }
 
-    private func makeRow(for app: RegisteredApp) -> NSView {
-        let row = NSView()
-        row.translatesAutoresizingMaskIntoConstraints = false
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
 
-        let iconView = NSImageView()
+    private func setup() {
         iconView.imageScaling = .scaleProportionallyDown
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleIdentifier) {
-            iconView.image = NSWorkspace.shared.icon(forFile: url.path)
-        }
-        row.addSubview(iconView)
+        addSubview(iconView)
 
-        let label = NSTextField(labelWithString: app.name)
-        label.font = NSFont.systemFont(ofSize: 13)
-        label.lineBreakMode = .byTruncatingTail
-        label.translatesAutoresizingMaskIntoConstraints = false
-        row.addSubview(label)
-
-        let hint = NSTextField(labelWithString: "v0.2…")
-        hint.font = NSFont.systemFont(ofSize: 10)
-        hint.textColor = .tertiaryLabelColor
-        hint.translatesAutoresizingMaskIntoConstraints = false
-        row.addSubview(hint)
+        nameLabel.font = NSFont.systemFont(ofSize: 13)
+        nameLabel.lineBreakMode = .byTruncatingTail
+        nameLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(nameLabel)
 
         NSLayoutConstraint.activate([
-            iconView.leadingAnchor.constraint(equalTo: row.leadingAnchor),
-            iconView.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: 22),
             iconView.heightAnchor.constraint(equalToConstant: 22),
 
-            label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
-            label.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-
-            hint.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 8),
-            hint.trailingAnchor.constraint(equalTo: row.trailingAnchor),
-            hint.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-
-            row.heightAnchor.constraint(equalToConstant: 30),
+            nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
+            nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            nameLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
         ])
+    }
 
-        return row
+    func configure(with app: RegisteredApp) {
+        iconView.image = app.icon
+        nameLabel.stringValue = app.name
     }
 }

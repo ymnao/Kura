@@ -53,7 +53,7 @@ Sources/Kura/
 ├── KuraPopover.swift         ポップオーバー UI
 ├── MenuBarScanner.swift      AXUIElement で他アプリの項目を列挙
 ├── ItemDispatcher.swift      AXPress で項目を発火
-└── Settings.swift            登録アプリの永続化（UserDefaults）
+└── RegistrationStore.swift   登録アプリの永続化（UserDefaults）
 ```
 
 ## 制約と妥協

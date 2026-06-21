@@ -4,6 +4,10 @@ final class SettingsViewController: NSViewController {
     private let tableView = NSTableView()
     private var observerToken: Any?
 
+    private static let iconColumnId = NSUserInterfaceItemIdentifier("icon")
+    private static let nameColumnId = NSUserInterfaceItemIdentifier("name")
+    private static let actionColumnId = NSUserInterfaceItemIdentifier("action")
+
     override func loadView() {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 420))
 
@@ -16,6 +20,7 @@ final class SettingsViewController: NSViewController {
         hint.font = NSFont.systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
         hint.maximumNumberOfLines = 0
+        hint.preferredMaxLayoutWidth = 480
         hint.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(hint)
 
@@ -33,17 +38,17 @@ final class SettingsViewController: NSViewController {
         tableView.gridStyleMask = []
         tableView.intercellSpacing = NSSize(width: 0, height: 4)
 
-        let iconColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("icon"))
+        let iconColumn = NSTableColumn(identifier: Self.iconColumnId)
         iconColumn.width = 28
         iconColumn.minWidth = 28
         iconColumn.maxWidth = 28
         tableView.addTableColumn(iconColumn)
 
-        let nameColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
+        let nameColumn = NSTableColumn(identifier: Self.nameColumnId)
         nameColumn.width = 340
         tableView.addTableColumn(nameColumn)
 
-        let actionColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("action"))
+        let actionColumn = NSTableColumn(identifier: Self.actionColumnId)
         actionColumn.width = 100
         actionColumn.minWidth = 100
         actionColumn.maxWidth = 100
@@ -77,7 +82,7 @@ final class SettingsViewController: NSViewController {
         view = container
 
         observerToken = NotificationCenter.default.addObserver(
-            forName: Settings.didChange, object: nil, queue: .main
+            forName: RegistrationStore.didChange, object: nil, queue: .main
         ) { [weak self] _ in
             self?.tableView.reloadData()
         }
@@ -101,7 +106,7 @@ final class SettingsViewController: NSViewController {
             }
             .sorted { $0.1.localizedCaseInsensitiveCompare($1.1) == .orderedAscending }
 
-        let registeredIds = Set(Settings.shared.registeredApps.map { $0.bundleIdentifier })
+        let registeredIds = Set(RegistrationStore.shared.registeredApps.map { $0.bundleIdentifier })
 
         if candidates.isEmpty {
             let item = NSMenuItem(title: "起動中のアプリがありません", action: nil, keyEquivalent: "")
@@ -114,7 +119,7 @@ final class SettingsViewController: NSViewController {
             item.target = self
             item.representedObject = RegisteredApp(bundleIdentifier: bid, name: name)
             if let icon = icon {
-                let resized = icon.copy() as? NSImage ?? icon
+                let resized = icon.copy() as! NSImage
                 resized.size = NSSize(width: 16, height: 16)
                 item.image = resized
             }
@@ -125,54 +130,72 @@ final class SettingsViewController: NSViewController {
             menu.addItem(item)
         }
 
-        let origin = NSPoint(x: 0, y: sender.bounds.height + 4)
-        menu.popUp(positioning: nil, at: origin, in: sender)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
     }
 
     @objc private func menuPickApp(_ sender: NSMenuItem) {
         guard let app = sender.representedObject as? RegisteredApp else { return }
-        Settings.shared.add(app)
+        RegistrationStore.shared.add(app)
     }
 
     @objc private func removeApp(_ sender: NSButton) {
-        let row = sender.tag
-        let apps = Settings.shared.registeredApps
+        let row = tableView.row(for: sender)
+        let apps = RegistrationStore.shared.registeredApps
         guard apps.indices.contains(row) else { return }
-        Settings.shared.remove(apps[row])
+        RegistrationStore.shared.remove(apps[row])
     }
 }
 
 extension SettingsViewController: NSTableViewDataSource {
     func numberOfRows(in tableView: NSTableView) -> Int {
-        Settings.shared.registeredApps.count
+        RegistrationStore.shared.registeredApps.count
     }
 }
 
 extension SettingsViewController: NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let column = tableColumn else { return nil }
-        let apps = Settings.shared.registeredApps
+        let apps = RegistrationStore.shared.registeredApps
         guard apps.indices.contains(row) else { return nil }
         let app = apps[row]
 
-        switch column.identifier.rawValue {
-        case "icon":
-            let imageView = NSImageView()
-            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleIdentifier) {
-                imageView.image = NSWorkspace.shared.icon(forFile: url.path)
+        switch column.identifier {
+        case Self.iconColumnId:
+            let cell: NSImageView
+            if let recycled = tableView.makeView(withIdentifier: column.identifier, owner: self) as? NSImageView {
+                cell = recycled
+            } else {
+                cell = NSImageView()
+                cell.identifier = column.identifier
+                cell.imageScaling = .scaleProportionallyDown
             }
-            imageView.imageScaling = .scaleProportionallyDown
-            return imageView
-        case "name":
-            let label = NSTextField(labelWithString: app.name)
-            label.lineBreakMode = .byTruncatingTail
-            return label
-        case "action":
-            let button = NSButton(title: "蔵から出す", target: self, action: #selector(removeApp(_:)))
-            button.bezelStyle = .rounded
-            button.controlSize = .small
-            button.tag = row
-            return button
+            cell.image = app.icon
+            return cell
+
+        case Self.nameColumnId:
+            let cell: NSTextField
+            if let recycled = tableView.makeView(withIdentifier: column.identifier, owner: self) as? NSTextField {
+                cell = recycled
+            } else {
+                cell = NSTextField(labelWithString: "")
+                cell.identifier = column.identifier
+                cell.lineBreakMode = .byTruncatingTail
+            }
+            cell.stringValue = app.name
+            return cell
+
+        case Self.actionColumnId:
+            let cell: NSButton
+            if let recycled = tableView.makeView(withIdentifier: column.identifier, owner: self) as? NSButton {
+                cell = recycled
+            } else {
+                cell = NSButton(title: "蔵から出す", target: self, action: #selector(removeApp(_:)))
+                cell.identifier = column.identifier
+                cell.bezelStyle = .rounded
+                cell.controlSize = .small
+            }
+            return cell
+
         default:
             return nil
         }

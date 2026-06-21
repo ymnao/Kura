@@ -1,14 +1,28 @@
-import Foundation
+import AppKit
 
-struct RegisteredApp: Codable, Identifiable, Equatable, Hashable {
-    var id: String { bundleIdentifier }
+struct RegisteredApp: Codable, Hashable {
     let bundleIdentifier: String
     let name: String
+
+    var icon: NSImage? {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
+            return nil
+        }
+        return NSWorkspace.shared.icon(forFile: url.path)
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.bundleIdentifier == rhs.bundleIdentifier
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(bundleIdentifier)
+    }
 }
 
-final class Settings {
-    static let shared = Settings()
-    static let didChange = Notification.Name("KuraSettingsDidChange")
+final class RegistrationStore {
+    static let shared = RegistrationStore()
+    static let didChange = Notification.Name("KuraRegistrationDidChange")
 
     private let storageKey = "registeredApps"
     private let defaults = UserDefaults.standard
@@ -32,9 +46,8 @@ final class Settings {
     }
 
     func remove(_ app: RegisteredApp) {
-        let before = registeredApps.count
-        registeredApps.removeAll { $0 == app }
-        guard registeredApps.count != before else { return }
+        guard let idx = registeredApps.firstIndex(of: app) else { return }
+        registeredApps.remove(at: idx)
         persist()
         notifyChange()
     }
