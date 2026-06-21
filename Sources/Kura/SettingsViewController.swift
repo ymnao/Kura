@@ -16,7 +16,7 @@ final class SettingsViewController: NSViewController {
         title.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(title)
 
-        let hint = NSTextField(labelWithString: "ここに登録したアプリのメニューバー項目が、蔵のポップオーバーから呼び出せるようになります（操作の実装は v0.2 以降）。")
+        let hint = NSTextField(labelWithString: "ここに登録したアプリのメニューバー項目が、蔵のポップオーバーから表示されます（クリックでの操作は v0.3 以降）。")
         hint.font = NSFont.systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
         hint.maximumNumberOfLines = 0

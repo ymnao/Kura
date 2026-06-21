@@ -1,11 +1,25 @@
 import AppKit
 
+final class AppNode {
+    let app: RegisteredApp
+    var items: [MenuBarItem]?
+
+    init(_ app: RegisteredApp) {
+        self.app = app
+    }
+}
+
 final class KuraViewController: NSViewController {
-    private let tableView = NSTableView()
+    private let outlineView = NSOutlineView()
     private let emptyLabel = NSTextField(labelWithString: "")
     private var observerToken: Any?
 
-    private static let cellId = NSUserInterfaceItemIdentifier("kura.appRow")
+    private var appNodes: [AppNode] = []
+    private var nodeCache: [String: AppNode] = [:]
+
+    private static let columnId = NSUserInterfaceItemIdentifier("kura.row")
+    private static let appCellId = NSUserInterfaceItemIdentifier("kura.appRow")
+    private static let itemCellId = NSUserInterfaceItemIdentifier("kura.itemRow")
 
     override func loadView() {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 420))
@@ -21,21 +35,25 @@ final class KuraViewController: NSViewController {
         separator.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(separator)
 
-        tableView.headerView = nil
-        tableView.rowHeight = 30
-        tableView.gridStyleMask = []
-        tableView.selectionHighlightStyle = .none
-        tableView.backgroundColor = .clear
-        tableView.intercellSpacing = NSSize(width: 0, height: 2)
-        tableView.dataSource = self
-        tableView.delegate = self
-        tableView.addTableColumn(NSTableColumn(identifier: Self.cellId))
+        let column = NSTableColumn(identifier: Self.columnId)
+        outlineView.headerView = nil
+        outlineView.rowHeight = 28
+        outlineView.gridStyleMask = []
+        outlineView.selectionHighlightStyle = .none
+        outlineView.backgroundColor = .clear
+        outlineView.indentationPerLevel = 14
+        outlineView.indentationMarkerFollowsCell = true
+        outlineView.intercellSpacing = NSSize(width: 0, height: 2)
+        outlineView.addTableColumn(column)
+        outlineView.outlineTableColumn = column
+        outlineView.dataSource = self
+        outlineView.delegate = self
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
-        scrollView.documentView = tableView
+        scrollView.documentView = outlineView
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(scrollView)
 
@@ -57,8 +75,8 @@ final class KuraViewController: NSViewController {
             separator.heightAnchor.constraint(equalToConstant: 1),
 
             scrollView.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
-            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
 
             emptyLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
@@ -88,31 +106,75 @@ final class KuraViewController: NSViewController {
     }
 
     private func reload() {
-        tableView.reloadData()
-        emptyLabel.isHidden = !RegistrationStore.shared.registeredApps.isEmpty
-    }
-}
-
-extension KuraViewController: NSTableViewDataSource {
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        RegistrationStore.shared.registeredApps.count
-    }
-}
-
-extension KuraViewController: NSTableViewDelegate {
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let apps = RegistrationStore.shared.registeredApps
-        guard apps.indices.contains(row) else { return nil }
-
-        let cell: AppRowView
-        if let recycled = tableView.makeView(withIdentifier: Self.cellId, owner: self) as? AppRowView {
-            cell = recycled
-        } else {
-            cell = AppRowView()
-            cell.identifier = Self.cellId
+        appNodes = apps.map { app in
+            if let cached = nodeCache[app.bundleIdentifier], cached.app == app {
+                return cached
+            }
+            let node = AppNode(app)
+            nodeCache[app.bundleIdentifier] = node
+            return node
         }
-        cell.configure(with: apps[row])
-        return cell
+        let activeIds = Set(apps.map { $0.bundleIdentifier })
+        nodeCache = nodeCache.filter { activeIds.contains($0.key) }
+
+        outlineView.reloadData()
+        emptyLabel.isHidden = !appNodes.isEmpty
+    }
+}
+
+extension KuraViewController: NSOutlineViewDataSource {
+    func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        if item == nil {
+            return appNodes.count
+        }
+        if let node = item as? AppNode {
+            if node.items == nil {
+                node.items = MenuBarScanner.scan(node.app)
+            }
+            return node.items?.count ?? 0
+        }
+        return 0
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+        if item == nil {
+            return appNodes[index]
+        }
+        let node = item as! AppNode
+        return node.items![index]
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
+        item is AppNode
+    }
+}
+
+extension KuraViewController: NSOutlineViewDelegate {
+    func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
+        if let node = item as? AppNode {
+            let cell: AppRowView
+            if let recycled = outlineView.makeView(withIdentifier: Self.appCellId, owner: self) as? AppRowView {
+                cell = recycled
+            } else {
+                cell = AppRowView()
+                cell.identifier = Self.appCellId
+            }
+            cell.configure(with: node.app)
+            return cell
+        }
+        if let item = item as? MenuBarItem {
+            let cell: MenuItemRowView
+            if let recycled = outlineView.makeView(withIdentifier: Self.itemCellId, owner: self) as? MenuItemRowView {
+                cell = recycled
+            } else {
+                cell = MenuItemRowView()
+                cell.identifier = Self.itemCellId
+            }
+            cell.configure(with: item)
+            return cell
+        }
+        return nil
     }
 }
 
@@ -135,7 +197,7 @@ final class AppRowView: NSTableCellView {
         iconView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(iconView)
 
-        nameLabel.font = NSFont.systemFont(ofSize: 13)
+        nameLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(nameLabel)
@@ -143,8 +205,8 @@ final class AppRowView: NSTableCellView {
         NSLayoutConstraint.activate([
             iconView.leadingAnchor.constraint(equalTo: leadingAnchor),
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 22),
-            iconView.heightAnchor.constraint(equalToConstant: 22),
+            iconView.widthAnchor.constraint(equalToConstant: 20),
+            iconView.heightAnchor.constraint(equalToConstant: 20),
 
             nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
             nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -155,5 +217,37 @@ final class AppRowView: NSTableCellView {
     func configure(with app: RegisteredApp) {
         iconView.image = app.icon
         nameLabel.stringValue = app.name
+    }
+}
+
+final class MenuItemRowView: NSTableCellView {
+    private let titleLabel = NSTextField(labelWithString: "")
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    private func setup() {
+        titleLabel.font = NSFont.systemFont(ofSize: 12)
+        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(titleLabel)
+
+        NSLayoutConstraint.activate([
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
+            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+    }
+
+    func configure(with item: MenuBarItem) {
+        titleLabel.stringValue = item.title
     }
 }
