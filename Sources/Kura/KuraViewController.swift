@@ -12,6 +12,10 @@ final class AppNode {
 final class KuraViewController: NSViewController {
     private let outlineView = NSOutlineView()
     private let emptyLabel = NSTextField(labelWithString: "")
+    private let bannerContainer = NSView()
+    private let bannerLabel = NSTextField(labelWithString: "⚠ アクセシビリティ未許可")
+    private let bannerButton = NSButton()
+    private var bannerHeightConstraint: NSLayoutConstraint!
     private var observerToken: Any?
 
     private var appNodes: [AppNode] = []
@@ -49,6 +53,29 @@ final class KuraViewController: NSViewController {
         outlineView.dataSource = self
         outlineView.delegate = self
 
+        bannerContainer.wantsLayer = true
+        bannerContainer.layer?.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.15).cgColor
+        bannerContainer.layer?.cornerRadius = 6
+        bannerContainer.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(bannerContainer)
+
+        bannerLabel.font = NSFont.systemFont(ofSize: 11)
+        bannerLabel.textColor = .secondaryLabelColor
+        bannerLabel.lineBreakMode = .byTruncatingTail
+        bannerLabel.translatesAutoresizingMaskIntoConstraints = false
+        bannerContainer.addSubview(bannerLabel)
+
+        bannerButton.title = "設定を開く"
+        bannerButton.bezelStyle = .rounded
+        bannerButton.controlSize = .small
+        bannerButton.target = self
+        bannerButton.action = #selector(openAccessibilitySettings(_:))
+        bannerButton.translatesAutoresizingMaskIntoConstraints = false
+        bannerContainer.addSubview(bannerButton)
+
+        bannerHeightConstraint = bannerContainer.heightAnchor.constraint(equalToConstant: 0)
+        bannerHeightConstraint.isActive = true
+
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
@@ -74,7 +101,18 @@ final class KuraViewController: NSViewController {
             separator.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
             separator.heightAnchor.constraint(equalToConstant: 1),
 
-            scrollView.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
+            bannerContainer.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
+            bannerContainer.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            bannerContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+
+            bannerLabel.leadingAnchor.constraint(equalTo: bannerContainer.leadingAnchor, constant: 10),
+            bannerLabel.centerYAnchor.constraint(equalTo: bannerContainer.centerYAnchor),
+            bannerLabel.trailingAnchor.constraint(lessThanOrEqualTo: bannerButton.leadingAnchor, constant: -8),
+
+            bannerButton.trailingAnchor.constraint(equalTo: bannerContainer.trailingAnchor, constant: -8),
+            bannerButton.centerYAnchor.constraint(equalTo: bannerContainer.centerYAnchor),
+
+            scrollView.topAnchor.constraint(equalTo: bannerContainer.bottomAnchor, constant: 8),
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
@@ -96,7 +134,18 @@ final class KuraViewController: NSViewController {
 
     override func viewWillAppear() {
         super.viewWillAppear()
+        updatePermissionBanner()
         reload()
+    }
+
+    private func updatePermissionBanner() {
+        let trusted = AccessibilityPermission.isTrusted
+        bannerContainer.isHidden = trusted
+        bannerHeightConstraint.constant = trusted ? 0 : 32
+    }
+
+    @objc private func openAccessibilitySettings(_ sender: Any?) {
+        AccessibilityPermission.openSystemSettings()
     }
 
     deinit {

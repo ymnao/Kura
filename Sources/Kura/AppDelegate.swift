@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSLog("[Kura] launch: AXIsProcessTrusted=\(AccessibilityPermission.isTrusted)")
         AccessibilityPermission.requestIfNeeded()
         setupStatusItem()
         setupPopover()

@@ -12,17 +12,27 @@ enum MenuBarScanner {
 
     private static func scanRaw(_ app: RegisteredApp) -> [MenuBarItem] {
         guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier).first else {
+            NSLog("[Kura] scan: not running: \(app.bundleIdentifier)")
             return []
         }
         let axApp = AXUIElementCreateApplication(running.processIdentifier)
         AXUIElementSetMessagingTimeout(axApp, 1.0)
 
-        guard let extras = copyAttribute(axApp, "AXExtrasMenuBar") else { return [] }
+        var extrasRef: CFTypeRef?
+        let extrasErr = AXUIElementCopyAttributeValue(axApp, "AXExtrasMenuBar" as CFString, &extrasRef)
+        guard extrasErr == .success, let extras = extrasRef else {
+            NSLog("[Kura] scan: \(app.bundleIdentifier) AXExtrasMenuBar err=\(extrasErr.rawValue)")
+            return []
+        }
         let extrasElement = extras as! AXUIElement
 
-        guard let raw = copyAttribute(extrasElement, kAXChildrenAttribute as String),
-              let children = raw as? [AXUIElement] else { return [] }
-
+        var childrenRef: CFTypeRef?
+        let childErr = AXUIElementCopyAttributeValue(extrasElement, kAXChildrenAttribute as CFString, &childrenRef)
+        guard childErr == .success, let children = childrenRef as? [AXUIElement] else {
+            NSLog("[Kura] scan: \(app.bundleIdentifier) AXChildren err=\(childErr.rawValue)")
+            return []
+        }
+        NSLog("[Kura] scan: \(app.bundleIdentifier) children=\(children.count)")
         return children.map { child in
             MenuBarItem(title: itemTitle(child), element: child)
         }
