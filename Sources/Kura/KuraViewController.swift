@@ -163,8 +163,8 @@ final class KuraViewController: NSViewController {
     @objc private func outlineViewClicked(_ sender: Any?) {
         let row = outlineView.clickedRow
         guard row >= 0, let item = outlineView.item(atRow: row) as? MenuBarItem else { return }
-        MenuBarDispatcher.press(item)
         onItemActivated?()
+        MenuBarDispatcher.press(item)
     }
 
     deinit {

@@ -13,13 +13,15 @@ BUNDLE_ID="local.kura.app"
 if pgrep -x Kura > /dev/null; then
     echo "==> stopping running Kura"
     pkill -x Kura || true
+    # SIGTERM 受信から実プロセス終了 + binary のファイルロック解放までの猶予
     sleep 0.5
 fi
+
+BIN_PATH="$(swift build -c "$CONFIG" --show-bin-path)/Kura"
 
 echo "==> swift build ($CONFIG)"
 swift build -c "$CONFIG"
 
-BIN_PATH="$(swift build -c "$CONFIG" --show-bin-path)/Kura"
 if [[ ! -x "$BIN_PATH" ]]; then
     echo "ERROR: binary not found at $BIN_PATH"
     exit 1
