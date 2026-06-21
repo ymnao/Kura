@@ -1,9 +1,14 @@
 import AppKit
 import ApplicationServices
 
-struct MenuBarItem {
+final class MenuBarItem {
     let title: String
     let element: AXUIElement
+
+    init(title: String, element: AXUIElement) {
+        self.title = title
+        self.element = element
+    }
 }
 
 enum ScanResult {

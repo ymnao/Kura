@@ -51,8 +51,14 @@ echo "$codesign_log" | grep -v "replacing existing signature" || true
 # CDHash 変化による TCC の「別アプリ判定」を避けるため、古い entry を毎ビルドでクリアする。
 # 起動時に必ず新規プロンプトが出るが、「許可済みなのに動かない」状態は無くなる。
 # (Apple DTS 推奨: ad-hoc では TCC thrash が前提)
+# 失敗しても処理は続けるが、明確に警告を出して「reset 済み」と誤認させない。
 echo "==> reset TCC accessibility entry for $BUNDLE_ID"
-tccutil reset Accessibility "$BUNDLE_ID" > /dev/null 2>&1 || true
+if ! tccutil_err=$(tccutil reset Accessibility "$BUNDLE_ID" 2>&1); then
+    echo "WARNING: tccutil reset 失敗: $tccutil_err"
+    echo "         古い TCC entry が残っている可能性があります。アクセシビリティ"
+    echo "         権限のプロンプトが出ない/効かない場合は、システム設定 → プライバシー"
+    echo "         → アクセシビリティ から Kura を手動で削除してください。"
+fi
 
 echo "==> built: $ROOT/$APP"
 echo ""
