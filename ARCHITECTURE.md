@@ -25,9 +25,9 @@
 └────────┬────────┘
          │ click on item
          ↓
-┌─────────────────┐
-│ ItemDispatcher  │  AXPress で対象項目を発火
-└─────────────────┘
+┌──────────────────┐
+│ MenuBarDispatcher│  AXPress で対象項目を発火
+└──────────────────┘
 ```
 
 ## API 選定
@@ -43,17 +43,19 @@
 | ホットキー登録 | `RegisterEventHotKey` (Carbon) | 不要 |
 | アプリアイコン取得 | `NSWorkspace.icon(forFile:)` | 不要 |
 
-## ファイル構成（計画）
+## ファイル構成
 
 ```
 Sources/Kura/
-├── main.swift                エントリポイント
-├── AppDelegate.swift         アプリ全体の組み立て
-├── KuraStatusItem.swift      メニューバーアイコンの管理
-├── KuraPopover.swift         ポップオーバー UI
-├── MenuBarScanner.swift      AXUIElement で他アプリの項目を列挙
-├── ItemDispatcher.swift      AXPress で項目を発火
-└── RegistrationStore.swift   登録アプリの永続化（UserDefaults）
+├── main.swift                    エントリポイント
+├── AppDelegate.swift             NSStatusItem / NSPopover の組み立て
+├── KuraViewController.swift      ポップオーバーの NSOutlineView UI
+├── SettingsViewController.swift  設定ウィンドウ（登録アプリ管理）
+├── MenuBarScanner.swift          AXUIElement で他アプリの項目を列挙
+├── MenuBarDispatcher.swift       AXPress で項目を発火
+├── MenuBarItem.swift             ScanResult / MenuBarItem 値型
+├── AccessibilityPermission.swift AX 権限の確認・要求・設定起動
+└── RegistrationStore.swift       登録アプリの永続化（UserDefaults）
 ```
 
 ## 制約と妥協
