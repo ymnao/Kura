@@ -38,7 +38,15 @@ echo "==> ad-hoc codesign"
 # ad-hoc 署名では CDHash が毎ビルド変わるため、--identifier だけでは TCC は「同じアプリ」と
 # 認識しきれない。Hardened Runtime (--options runtime) は dyld 層の保護で TCC とは別レイヤー、
 # ad-hoc 配布では益が薄く副作用源になり得るので外す。
-codesign --sign - --identifier "$BUNDLE_ID" --force "$APP" 2>&1 | grep -v "replacing existing signature" || true
+# 出力をキャプチャしてから「replacing existing signature」だけ抑制する。
+# `codesign | grep | true` 形式だと codesign 自体の失敗が握り潰されるので
+# 終了コードは個別に評価する。
+codesign_log=$(codesign --sign - --identifier "$BUNDLE_ID" --force "$APP" 2>&1) || {
+    echo "ERROR: codesign failed:"
+    echo "$codesign_log"
+    exit 1
+}
+echo "$codesign_log" | grep -v "replacing existing signature" || true
 
 # CDHash 変化による TCC の「別アプリ判定」を避けるため、古い entry を毎ビルドでクリアする。
 # 起動時に必ず新規プロンプトが出るが、「許可済みなのに動かない」状態は無くなる。
