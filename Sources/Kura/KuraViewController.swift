@@ -1,11 +1,15 @@
 import AppKit
 
-private final class EmptyRow {}
+private final class EmptyRow {
+    static let shared = EmptyRow()
+    private init() {}
+}
 
 final class AppNode {
     let app: RegisteredApp
     var items: [MenuBarItem]?
-    let placeholder = EmptyRow()
+    var isScanning: Bool = false
+    var scanGeneration: Int = 0
 
     init(_ app: RegisteredApp) {
         self.app = app
@@ -158,10 +162,10 @@ final class KuraViewController: NSViewController {
     private func reload() {
         let apps = RegistrationStore.shared.registeredApps
         appNodes = apps.map { app in
-            if let cached = nodeCache[app.bundleIdentifier], cached.app == app {
-                return cached
-            }
-            let node = AppNode(app)
+            let node = nodeCache[app.bundleIdentifier].map { $0.app == app ? $0 : AppNode(app) } ?? AppNode(app)
+            node.items = nil
+            node.isScanning = false
+            node.scanGeneration &+= 1
             nodeCache[app.bundleIdentifier] = node
             return node
         }
@@ -170,6 +174,22 @@ final class KuraViewController: NSViewController {
 
         outlineView.reloadData()
         emptyLabel.isHidden = !appNodes.isEmpty
+    }
+
+    private func scanIfNeeded(_ node: AppNode) {
+        guard node.items == nil, !node.isScanning else { return }
+        node.isScanning = true
+        let generation = node.scanGeneration
+        DispatchQueue.global(qos: .userInitiated).async {
+            let items = MenuBarScanner.scan(node.app)
+            DispatchQueue.main.async { [weak self] in
+                guard node.scanGeneration == generation else { return }
+                node.items = items
+                node.isScanning = false
+                guard let self = self, self.appNodes.contains(where: { $0 === node }) else { return }
+                self.outlineView.reloadItem(node, reloadChildren: true)
+            }
+        }
     }
 
     private func dequeue<T: NSTableCellView>(_ id: NSUserInterfaceItemIdentifier) -> T {
@@ -188,9 +208,7 @@ extension KuraViewController: NSOutlineViewDataSource {
             return appNodes.count
         }
         if let node = item as? AppNode {
-            if node.items == nil {
-                node.items = MenuBarScanner.scan(node.app)
-            }
+            scanIfNeeded(node)
             return max(node.items?.count ?? 0, 1)
         }
         return 0
@@ -203,7 +221,7 @@ extension KuraViewController: NSOutlineViewDataSource {
         let node = item as! AppNode
         let items = node.items ?? []
         if items.isEmpty {
-            return node.placeholder
+            return EmptyRow.shared
         }
         return items[index]
     }
