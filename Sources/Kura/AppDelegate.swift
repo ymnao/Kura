@@ -25,7 +25,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover = NSPopover()
         popover.contentSize = NSSize(width: 320, height: 420)
         popover.behavior = .transient
-        popover.contentViewController = KuraViewController()
+        let vc = KuraViewController()
+        vc.onItemActivated = { [weak self] in
+            self?.popover.performClose(nil)
+        }
+        popover.contentViewController = vc
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {

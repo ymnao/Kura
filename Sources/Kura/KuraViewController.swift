@@ -29,6 +29,8 @@ final class KuraViewController: NSViewController {
     private var appNodes: [AppNode] = []
     private var nodeCache: [String: AppNode] = [:]
 
+    var onItemActivated: (() -> Void)?
+
     private static let appCellId = NSUserInterfaceItemIdentifier("kura.appRow")
     private static let itemCellId = NSUserInterfaceItemIdentifier("kura.itemRow")
 
@@ -59,6 +61,8 @@ final class KuraViewController: NSViewController {
         outlineView.outlineTableColumn = column
         outlineView.dataSource = self
         outlineView.delegate = self
+        outlineView.target = self
+        outlineView.action = #selector(outlineViewClicked(_:))
 
         bannerContainer.wantsLayer = true
         bannerContainer.layer?.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.15).cgColor
@@ -154,6 +158,13 @@ final class KuraViewController: NSViewController {
 
     @objc private func openAccessibilitySettings(_ sender: Any?) {
         AccessibilityPermission.openSystemSettings()
+    }
+
+    @objc private func outlineViewClicked(_ sender: Any?) {
+        let row = outlineView.clickedRow
+        guard row >= 0, let item = outlineView.item(atRow: row) as? MenuBarItem else { return }
+        MenuBarDispatcher.press(item)
+        onItemActivated?()
     }
 
     deinit {
