@@ -1,6 +1,5 @@
-import ApplicationServices
-
 import AppKit
+import ApplicationServices
 
 enum AccessibilityPermission {
     static var isTrusted: Bool {

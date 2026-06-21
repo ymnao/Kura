@@ -1,8 +1,11 @@
 import AppKit
 
+private final class EmptyRow {}
+
 final class AppNode {
     let app: RegisteredApp
     var items: [MenuBarItem]?
+    let placeholder = EmptyRow()
 
     init(_ app: RegisteredApp) {
         self.app = app
@@ -21,7 +24,6 @@ final class KuraViewController: NSViewController {
     private var appNodes: [AppNode] = []
     private var nodeCache: [String: AppNode] = [:]
 
-    private static let columnId = NSUserInterfaceItemIdentifier("kura.row")
     private static let appCellId = NSUserInterfaceItemIdentifier("kura.appRow")
     private static let itemCellId = NSUserInterfaceItemIdentifier("kura.itemRow")
 
@@ -39,7 +41,7 @@ final class KuraViewController: NSViewController {
         separator.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(separator)
 
-        let column = NSTableColumn(identifier: Self.columnId)
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("kura.row"))
         outlineView.headerView = nil
         outlineView.rowHeight = 28
         outlineView.gridStyleMask = []
@@ -56,6 +58,7 @@ final class KuraViewController: NSViewController {
         bannerContainer.wantsLayer = true
         bannerContainer.layer?.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.15).cgColor
         bannerContainer.layer?.cornerRadius = 6
+        bannerContainer.clipsToBounds = true
         bannerContainer.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(bannerContainer)
 
@@ -139,9 +142,7 @@ final class KuraViewController: NSViewController {
     }
 
     private func updatePermissionBanner() {
-        let trusted = AccessibilityPermission.isTrusted
-        bannerContainer.isHidden = trusted
-        bannerHeightConstraint.constant = trusted ? 0 : 32
+        bannerHeightConstraint.constant = AccessibilityPermission.isTrusted ? 0 : 32
     }
 
     @objc private func openAccessibilitySettings(_ sender: Any?) {
@@ -170,6 +171,15 @@ final class KuraViewController: NSViewController {
         outlineView.reloadData()
         emptyLabel.isHidden = !appNodes.isEmpty
     }
+
+    private func dequeue<T: NSTableCellView>(_ id: NSUserInterfaceItemIdentifier) -> T {
+        if let recycled = outlineView.makeView(withIdentifier: id, owner: self) as? T {
+            return recycled
+        }
+        let cell = T()
+        cell.identifier = id
+        return cell
+    }
 }
 
 extension KuraViewController: NSOutlineViewDataSource {
@@ -181,7 +191,7 @@ extension KuraViewController: NSOutlineViewDataSource {
             if node.items == nil {
                 node.items = MenuBarScanner.scan(node.app)
             }
-            return node.items?.count ?? 0
+            return max(node.items?.count ?? 0, 1)
         }
         return 0
     }
@@ -191,7 +201,11 @@ extension KuraViewController: NSOutlineViewDataSource {
             return appNodes[index]
         }
         let node = item as! AppNode
-        return node.items![index]
+        let items = node.items ?? []
+        if items.isEmpty {
+            return node.placeholder
+        }
+        return items[index]
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
@@ -202,25 +216,18 @@ extension KuraViewController: NSOutlineViewDataSource {
 extension KuraViewController: NSOutlineViewDelegate {
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         if let node = item as? AppNode {
-            let cell: AppRowView
-            if let recycled = outlineView.makeView(withIdentifier: Self.appCellId, owner: self) as? AppRowView {
-                cell = recycled
-            } else {
-                cell = AppRowView()
-                cell.identifier = Self.appCellId
-            }
+            let cell: AppRowView = dequeue(Self.appCellId)
             cell.configure(with: node.app)
             return cell
         }
-        if let item = item as? MenuBarItem {
-            let cell: MenuItemRowView
-            if let recycled = outlineView.makeView(withIdentifier: Self.itemCellId, owner: self) as? MenuItemRowView {
-                cell = recycled
-            } else {
-                cell = MenuItemRowView()
-                cell.identifier = Self.itemCellId
-            }
-            cell.configure(with: item)
+        if let menuItem = item as? MenuBarItem {
+            let cell: MenuItemRowView = dequeue(Self.itemCellId)
+            cell.configure(title: menuItem.title, isPlaceholder: false)
+            return cell
+        }
+        if item is EmptyRow {
+            let cell: MenuItemRowView = dequeue(Self.itemCellId)
+            cell.configure(title: "(メニュー項目なし)", isPlaceholder: true)
             return cell
         }
         return nil
@@ -284,7 +291,6 @@ final class MenuItemRowView: NSTableCellView {
 
     private func setup() {
         titleLabel.font = NSFont.systemFont(ofSize: 12)
-        titleLabel.textColor = .secondaryLabelColor
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(titleLabel)
@@ -296,8 +302,8 @@ final class MenuItemRowView: NSTableCellView {
         ])
     }
 
-    func configure(with item: MenuBarItem) {
-        titleLabel.stringValue = item.title
-        titleLabel.textColor = item.element == nil ? .tertiaryLabelColor : .secondaryLabelColor
+    func configure(title: String, isPlaceholder: Bool) {
+        titleLabel.stringValue = title
+        titleLabel.textColor = isPlaceholder ? .tertiaryLabelColor : .secondaryLabelColor
     }
 }
