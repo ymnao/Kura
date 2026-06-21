@@ -4,13 +4,9 @@ import ApplicationServices
 enum MenuBarScanner {
     private static let messagingTimeout: Float = 1.0
 
-    static func scan(_ app: RegisteredApp) -> ScanResult {
+    static func scan(_ app: StatusBarApp) -> ScanResult {
         let bundleId = app.bundleIdentifier
-        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first else {
-            NSLog("[Kura] scan: not running: %@", bundleId)
-            return .notRunning
-        }
-        let axApp = AXUIElementCreateApplication(running.processIdentifier)
+        let axApp = AXUIElementCreateApplication(app.pid)
         AXUIElementSetMessagingTimeout(axApp, messagingTimeout)
 
         let extrasResult = copyElement(axApp, attribute: "AXExtrasMenuBar", label: bundleId)

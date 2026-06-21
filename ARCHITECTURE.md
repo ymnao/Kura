@@ -47,48 +47,64 @@
 
 ```
 Sources/Kura/
-├── main.swift                    エントリポイント
-├── AppDelegate.swift             NSStatusItem / NSPopover の組み立て
+├── KuraApp.swift                 エントリポイント（@main struct, @MainActor 隔離）
+├── AppDelegate.swift             NSStatusItem (本体 + セパレータ) / NSPopover の組み立て、折りたたみ
 ├── KuraViewController.swift      ポップオーバーの NSOutlineView UI
-├── SettingsViewController.swift  設定ウィンドウ（登録アプリ管理）
-├── MenuBarScanner.swift          AXUIElement で他アプリの項目を列挙
+├── MenuBarLayoutScanner.swift    全アプリの NSStatusItem 座標から蔵対象を列挙
+├── MenuBarScanner.swift          AXUIElement で対象アプリの項目を列挙
 ├── MenuBarDispatcher.swift       AXPress で項目を発火
 ├── MenuBarItem.swift             ScanResult / MenuBarItem 値型
-├── AccessibilityPermission.swift AX 権限の確認・要求・設定起動
-└── RegistrationStore.swift       登録アプリの永続化（UserDefaults）
+└── AccessibilityPermission.swift AX 権限の確認・要求・設定起動
 ```
 
-## 折りたたみ方針（v0.4 以降）
+## 折りたたみ方針（v0.4 で実装済み）
 
-メニューバーアイコンの折りたたみは **NSStatusItem.length 膨張方式**（Hidden Bar / Vanilla / Dozer と同じ）で実装する。画面録画権限不要、アクセシビリティ権限すら不要で、自分の NSStatusItem の `length` を巨大化することで、左隣のアイコンを画面外（ノッチ裏含む）に押し出して物理的に隠す。
+メニューバーアイコンの折りたたみは **NSStatusItem.length 膨張方式**（Hidden Bar / Vanilla / Dozer と同じ）で実装している。画面録画権限不要、アクセシビリティ権限すら不要で、NSStatusItem の `length` を巨大化することで、左隣のアイコンを画面外（ノッチ裏含む）に押し出して物理的に隠す。
 
-### UI 構成 — 蔵 1 個方式（セパレータ別を持たない）
+### UI 構成 — 蔵本体 + セパレータの 2 NSStatusItem 方式
 
-Hidden Bar は「セパレータ NSStatusItem」と「メインボタン」の 2 つに分離しているが、Kura は**蔵 1 個に統合**する。蔵自身の `length` を切替、ボタン画像は右寄せ（`imagePosition = .imageRight` / `alignment = .right`）にして、length 膨張時は「右端に蔵アイコン、左側は透明な占有領域」を作る。
+当初は「蔵 1 個方式」を目指したが、`NSStatusBarButton` の content（image/title）が**ボタンフレームの中央**に hard-coded で配置される仕様のため、`length` 膨張時に蔵自身が画面外に消える問題が発生。`imagePosition`、`alignment`、`attributedTitle.paragraphStyle`、巨大 NSImage、いずれも content を右端固定できず断念。
+
+代わりに Hidden Bar と同じ **2 NSStatusItem 方式** を採用:
+
+- **蔵本体** (`statusItem`): 通常 `variableLength`、常に右端側に表示。「蔵」テキスト表示
+- **セパレータ** (`separatorItem`): 通常 `length=8`（薄い縦線アイコン）。折りたたみ時 `length=max(500, min(screenWidth*2, 10000))` で膨張、左隣のアイコンを押し出す
 
 ```
-オフ:  [Slack][Drop][Notion] [蔵]   ← 蔵の length は通常
-オン:                        [蔵]   ← 蔵の length=4000、左は画面外
+展開:  [Alfred][｜][蔵]            ← セパレータ length=8
+折畳:                  [蔵]        ← セパレータ length=4000+、その左は画面外
 ```
+
+両 NSStatusItem は `autosaveName`（`kura.main` / `kura.separator`）で位置を永続化。初回起動時はユーザーが ⌘+ドラッグで「セパレータを蔵の左」に並べ替える必要がある。
+
+`isVisible = true` を起動時に呼び、ユーザーが ⌘+ドラッグでメニューバーから外した場合の自動復元も入れる。
 
 ### ON/OFF 切替 UI — 右クリックメニュー
 
-切替操作は**蔵の右クリックメニュー**に項目追加で対応する。
+切替操作は**蔵の右クリックメニュー**で行う。
 
-- 左クリック → ポップオーバー（メニュー項目表示、従来通り）
-- 右クリック → メニュー（「折りたたむ／展開する」「設定…」「Kura を終了」）
+- 左クリック → ポップオーバー（蔵対象アプリのメニュー項目表示）
+- 右クリック → メニュー（「折りたたむ／展開する」「Kura を終了」）
 
-ポップオーバー上部にトグルを置く案も検討したが、開いた瞬間カーソル直下になる可能性があり**誤爆リスク**が高いため不採用。右クリックは既存（v0.3 時点で「設定…」「終了」が出る）なので、ユーザーの新たな学習コストはほぼゼロ。
+セパレータが蔵の右にある配置では「折りたたむ」をグレーアウト（`isEnabled = false`）し、ツールチップで「セパレータを蔵の左に ⌘+ドラッグしてから使ってください」と案内する。
+
+折りたたみ状態は `separatorItem.length` で表現するため UserDefaults 永続化は不要。
 
 ### 対象アプリの選定 — 位置ベース
 
-「蔵に入れる対象アプリ」のリストは持たず、**蔵より左にある NSStatusItem = 蔵の対象** と定義する。
+「蔵に入れる対象アプリ」のリストは持たず、**蔵より左にある NSStatusItem を持つアプリ = 蔵の対象** と定義する。
 
 - ユーザーが ⌘+ドラッグで隠したいアイコンを蔵の左に置く
-- Kura は `kAXPositionAttribute` で各 NSStatusItem の座標を読み、蔵自身の座標と比較
-- 蔵より左にあるアプリを自動で蔵対象として列挙し、メニュー項目を AXPress で発火
+- Kura は `kAXPositionAttribute` で各 NSStatusItem の座標を読み、蔵自身の座標（`statusItem.button?.window?.frame.minX`）と比較
+- `x < kuraX && x > 0` のものを蔵対象として列挙
+- `x <= 0` は Control Center のドロップダウン hidden item や画面外の NSStatusItem を除外するためのフィルタ
+- ポップオーバーで各アプリの AXExtrasMenuBar 配下メニューを表示・AXPress で発火
 
-これにより「擬似的に非表示」と「蔵に入っている」が**構造的に一致**する（位置が定義そのもの）。RegistrationStore（明示的な登録設定）は将来この設計に置き換える予定。
+これにより「擬似的に非表示」と「蔵に入っている」が**構造的に一致**する。RegistrationStore（明示的な登録設定）は v0.4 で廃止。
+
+### スキャンタイミング
+
+ポップオーバーを開く度に `MenuBarLayoutScanner.scanLeftOfKura(kuraX:)` を `Task.detached` で実行する。AX 呼び出しは `messagingTimeout = 1.0` 秒で同期だが、`runningApplications` 全数走査になるためメインスレッドはブロックしない設計。
 
 ## 制約と妥協
 
@@ -106,7 +122,7 @@ Hidden Bar は「セパレータ NSStatusItem」と「メインボタン」の 2
 
 ## ロードマップ
 
-- **v0.4**: 蔵 1 個方式で length 膨張による折りたたみ実装 + 右クリックメニューに「折りたたむ／展開する」追加 + 位置ベース対象スキャナ（全アプリの AXExtrasMenuBar を列挙して蔵座標と比較）+ RegistrationStore 廃止
+- **v0.4** (完了): 蔵 1 個方式で length 膨張による折りたたみ実装 + 右クリックメニューに「折りたたむ／展開する」追加 + 位置ベース対象スキャナ（全アプリの AXExtrasMenuBar を列挙して蔵座標と比較）+ RegistrationStore 廃止
 - **v0.5**: ホットキー対応（Carbon `RegisterEventHotKey`）、開閉アニメーション、ノッチ裏アイコンの自動検出表示
 
 ## 未来の検討事項

@@ -5,13 +5,13 @@ fileprivate final class StatusRow {
 }
 
 final class AppNode {
-    let app: RegisteredApp
+    let app: StatusBarApp
     var result: ScanResult?
     var scanTask: Task<Void, Never>?
     var scanGeneration: Int = 0
     fileprivate let statusRow = StatusRow()
 
-    init(_ app: RegisteredApp) {
+    init(_ app: StatusBarApp) {
         self.app = app
     }
 }
@@ -24,10 +24,11 @@ final class KuraViewController: NSViewController {
     private let bannerLabel = NSTextField(labelWithString: "⚠ アクセシビリティ未許可")
     private let bannerButton = NSButton()
     private var bannerHeightConstraint: NSLayoutConstraint!
-    private var observerToken: Any?
 
     private var appNodes: [AppNode] = []
     private var nodeCache: [String: AppNode] = [:]
+    private var layoutTask: Task<Void, Never>?
+    private var kuraX: CGFloat = -.greatestFiniteMagnitude
 
     var onItemActivated: (() -> Void)?
 
@@ -96,7 +97,7 @@ final class KuraViewController: NSViewController {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(scrollView)
 
-        emptyLabel.stringValue = "蔵は空です\n\n右クリック → 設定… から\nアプリを納めてください"
+        emptyLabel.stringValue = "蔵の左にアイコンがありません\n\n隠したいメニューバーアイコンを\n蔵の左側にドラッグしてください"
         emptyLabel.font = NSFont.systemFont(ofSize: 12)
         emptyLabel.textColor = .tertiaryLabelColor
         emptyLabel.alignment = .center
@@ -136,18 +137,17 @@ final class KuraViewController: NSViewController {
         ])
 
         view = container
-
-        observerToken = NotificationCenter.default.addObserver(
-            forName: RegistrationStore.didChange, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.reload()
-            }
-        }
     }
 
     override func viewWillAppear() {
         super.viewWillAppear()
+        updatePermissionBanner()
+    }
+
+    /// AppDelegate からポップオーバー表示時に呼ばれる。蔵自身の現在の x 座標を渡す。
+    func refreshTargets(kuraX: CGFloat) {
+        loadViewIfNeeded()
+        self.kuraX = kuraX
         updatePermissionBanner()
         reload()
     }
@@ -168,14 +168,21 @@ final class KuraViewController: NSViewController {
     }
 
     deinit {
-        if let token = observerToken {
-            NotificationCenter.default.removeObserver(token)
-        }
+        layoutTask?.cancel()
         nodeCache.values.forEach { $0.scanTask?.cancel() }
     }
 
     private func reload() {
-        let apps = RegistrationStore.shared.registeredApps
+        layoutTask?.cancel()
+        let x = kuraX
+        layoutTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let apps = MenuBarLayoutScanner.scanLeftOfKura(kuraX: x)
+            await self?.applyTargets(apps)
+        }
+    }
+
+    private func applyTargets(_ apps: [StatusBarApp]) {
+        layoutTask = nil
         appNodes = apps.map { app in
             let node = nodeCache[app.bundleIdentifier].map { $0.app == app ? $0 : AppNode(app) } ?? AppNode(app)
             node.scanTask?.cancel()
@@ -321,7 +328,7 @@ final class AppRowView: NSTableCellView {
         ])
     }
 
-    func configure(with app: RegisteredApp) {
+    func configure(with app: StatusBarApp) {
         iconView.image = app.icon
         nameLabel.stringValue = app.name
     }
