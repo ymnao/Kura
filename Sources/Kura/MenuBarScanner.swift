@@ -5,14 +5,15 @@ enum MenuBarScanner {
     private static let messagingTimeout: Float = 1.0
 
     static func scan(_ app: RegisteredApp) -> ScanResult {
-        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier).first else {
-            NSLog("[Kura] scan: not running: \(app.bundleIdentifier)")
+        let bundleId = app.bundleIdentifier
+        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first else {
+            NSLog("[Kura] scan: not running: %@", bundleId)
             return .notRunning
         }
         let axApp = AXUIElementCreateApplication(running.processIdentifier)
         AXUIElementSetMessagingTimeout(axApp, messagingTimeout)
 
-        let extrasResult = copyElement(axApp, attribute: "AXExtrasMenuBar", label: app.bundleIdentifier)
+        let extrasResult = copyElement(axApp, attribute: "AXExtrasMenuBar", label: bundleId)
         let extrasElement: AXUIElement
         switch extrasResult {
         case .failure(let reason):
@@ -25,11 +26,11 @@ enum MenuBarScanner {
         var childrenRef: CFTypeRef?
         let childErr = AXUIElementCopyAttributeValue(extrasElement, kAXChildrenAttribute as CFString, &childrenRef)
         if childErr != .success {
-            NSLog("[Kura] scan: \(app.bundleIdentifier) AXChildren err=\(childErr.rawValue)")
+            NSLog("[Kura] scan: %@ AXChildren err=%d", bundleId, childErr.rawValue)
             return .failed("AXChildren err=\(childErr.rawValue)")
         }
         guard let array = childrenRef as? [AnyObject] else {
-            NSLog("[Kura] scan: \(app.bundleIdentifier) AXChildren wrong array type")
+            NSLog("[Kura] scan: %@ AXChildren wrong array type", bundleId)
             return .failed("AXChildren wrong array type")
         }
         let typeID = AXUIElementGetTypeID()
@@ -37,7 +38,7 @@ enum MenuBarScanner {
         children.reserveCapacity(array.count)
         for value in array {
             guard CFGetTypeID(value) == typeID else {
-                NSLog("[Kura] scan: \(app.bundleIdentifier) AXChildren wrong element type")
+                NSLog("[Kura] scan: %@ AXChildren wrong element type", bundleId)
                 return .failed("AXChildren wrong element type")
             }
             children.append(value as! AXUIElement)
@@ -48,12 +49,12 @@ enum MenuBarScanner {
         items.reserveCapacity(children.count)
         for child in children {
             if Task.isCancelled {
-                NSLog("[Kura] scan: \(app.bundleIdentifier) cancelled")
+                NSLog("[Kura] scan: %@ cancelled", bundleId)
                 return .failed("cancelled")
             }
             items.append(MenuBarItem(title: itemTitle(child), element: child))
         }
-        NSLog("[Kura] scan: \(app.bundleIdentifier) children=\(children.count)")
+        NSLog("[Kura] scan: %@ children=%d", bundleId, children.count)
         return .items(items)
     }
 
@@ -73,11 +74,11 @@ enum MenuBarScanner {
         var ref: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(element, attribute as CFString, &ref)
         if err != .success {
-            NSLog("[Kura] scan: \(label) \(attribute) err=\(err.rawValue)")
+            NSLog("[Kura] scan: %@ %@ err=%d", label, attribute, err.rawValue)
             return .failure(.axError(err))
         }
         guard let value = ref, CFGetTypeID(value) == AXUIElementGetTypeID() else {
-            NSLog("[Kura] scan: \(label) \(attribute) wrong type")
+            NSLog("[Kura] scan: %@ %@ wrong type", label, attribute)
             return .failure(.wrongType)
         }
         return .success(value as! AXUIElement)
