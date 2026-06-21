@@ -16,6 +16,7 @@ final class AppNode {
     }
 }
 
+@MainActor
 final class KuraViewController: NSViewController {
     private let outlineView = NSOutlineView()
     private let emptyLabel = NSTextField(labelWithString: "")
@@ -187,16 +188,17 @@ final class KuraViewController: NSViewController {
         let generation = node.scanGeneration
         node.scanTask = Task.detached(priority: .userInitiated) { [weak self] in
             let result = MenuBarScanner.scan(node.app)
-            await MainActor.run {
-                guard node.scanGeneration == generation else { return }
-                node.scanTask = nil
-                if Task.isCancelled { return }
-                node.result = result
-                node.statusRow.text = Self.statusText(for: result)
-                guard let self = self, self.appNodes.contains(where: { $0 === node }) else { return }
-                self.outlineView.reloadItem(node, reloadChildren: true)
-            }
+            await self?.handleScanCompletion(node: node, generation: generation, result: result)
         }
+    }
+
+    private func handleScanCompletion(node: AppNode, generation: Int, result: ScanResult) {
+        guard node.scanGeneration == generation else { return }
+        node.scanTask = nil
+        node.result = result
+        node.statusRow.text = Self.statusText(for: result)
+        guard appNodes.contains(where: { $0 === node }) else { return }
+        outlineView.reloadItem(node, reloadChildren: true)
     }
 
     private static func statusText(for result: ScanResult) -> String {
