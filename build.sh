@@ -25,9 +25,15 @@ cp "$BIN_PATH" "$APP/Contents/MacOS/Kura"
 cp "Resources/Info.plist" "$APP/Contents/Info.plist"
 
 echo "==> ad-hoc codesign"
-codesign --sign - --force --deep --options runtime "$APP" 2>&1 | grep -v "replacing existing signature" || true
+# --identifier を明示することで、再ビルド時も TCC から「同じアプリ」と認識されやすくする
+codesign --sign - --identifier local.kura.app --force --options runtime "$APP" 2>&1 | grep -v "replacing existing signature" || true
 
 echo "==> built: $ROOT/$APP"
 echo ""
 echo "起動: open $APP"
 echo "停止: pkill Kura"
+echo ""
+echo "アクセシビリティ権限が効かない場合:"
+echo "  1. システム設定 → プライバシー → アクセシビリティ で Kura を「−」で削除"
+echo "  2. pkill Kura && open $APP で再起動、プロンプトで許可"
+echo "  3. もう一度 pkill Kura && open $APP"
