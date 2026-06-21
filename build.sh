@@ -14,9 +14,12 @@ APP_EXEC="$ROOT/$APP/Contents/MacOS/Kura"
 # 別ディレクトリの同名 Kura や、たまたま "Kura" という名のプロセスを巻き込まないため、
 # このリポジトリの Kura.app 実行ファイルを絶対パスで指定して `-f` (full command line) と
 # `-x` (完全一致) で対象を限定する。
-if pgrep -fx "$APP_EXEC" > /dev/null 2>&1; then
+# 注: pgrep/pkill の pattern は -x 指定でも ERE として解釈されるため、APP_EXEC の
+# "." や、チェックアウト先に含まれ得る "[]()+?{|^$*\" 等を必ずリテラル化する。
+APP_EXEC_REGEX=$(printf '%s' "$APP_EXEC" | sed 's/[][().*+?^$|{}\\]/\\&/g')
+if pgrep -fx "$APP_EXEC_REGEX" > /dev/null 2>&1; then
     echo "==> stopping running Kura ($APP_EXEC)"
-    pkill -fx "$APP_EXEC" || true
+    pkill -fx "$APP_EXEC_REGEX" || true
     # SIGTERM 受信から実プロセス終了 + binary のファイルロック解放までの猶予
     sleep 0.5
 fi
