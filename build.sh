@@ -8,11 +8,15 @@ cd "$ROOT"
 CONFIG="${1:-release}"
 APP="Kura.app"
 BUNDLE_ID="local.kura.app"
+APP_EXEC="$ROOT/$APP/Contents/MacOS/Kura"
 
-# 既存プロセスを停止（codesign 中の差し替えと、新バイナリでの AX 権限プロンプトのため）
-if pgrep -x Kura > /dev/null; then
-    echo "==> stopping running Kura"
-    pkill -x Kura || true
+# 既存プロセスを停止（codesign 中の差し替えと、新バイナリでの AX 権限プロンプトのため）。
+# 別ディレクトリの同名 Kura や、たまたま "Kura" という名のプロセスを巻き込まないため、
+# このリポジトリの Kura.app 実行ファイルを絶対パスで指定して `-f` (full command line) と
+# `-x` (完全一致) で対象を限定する。
+if pgrep -fx "$APP_EXEC" > /dev/null 2>&1; then
+    echo "==> stopping running Kura ($APP_EXEC)"
+    pkill -fx "$APP_EXEC" || true
     # SIGTERM 受信から実プロセス終了 + binary のファイルロック解放までの猶予
     sleep 0.5
 fi
