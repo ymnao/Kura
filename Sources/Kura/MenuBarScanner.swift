@@ -29,18 +29,35 @@ enum MenuBarScanner {
             return .failed("AXChildren err=\(childErr.rawValue)")
         }
         guard let array = childrenRef as? [AnyObject] else {
-            return .items([])
+            NSLog("[Kura] scan: \(app.bundleIdentifier) AXChildren wrong array type")
+            return .failed("AXChildren wrong array type")
         }
         let typeID = AXUIElementGetTypeID()
-        let children: [AXUIElement] = array.compactMap {
-            CFGetTypeID($0) == typeID ? ($0 as! AXUIElement) : nil
+        var children: [AXUIElement] = []
+        children.reserveCapacity(array.count)
+        for value in array {
+            guard CFGetTypeID(value) == typeID else {
+                NSLog("[Kura] scan: \(app.bundleIdentifier) AXChildren wrong element type")
+                return .failed("AXChildren wrong element type")
+            }
+            children.append(value as! AXUIElement)
         }
         children.forEach { AXUIElementSetMessagingTimeout($0, messagingTimeout) }
+
+        var items: [MenuBarItem] = []
+        items.reserveCapacity(children.count)
+        for child in children {
+            if Task.isCancelled {
+                NSLog("[Kura] scan: \(app.bundleIdentifier) cancelled")
+                return .failed("cancelled")
+            }
+            items.append(MenuBarItem(title: itemTitle(child), element: child))
+        }
         NSLog("[Kura] scan: \(app.bundleIdentifier) children=\(children.count)")
-        return .items(children.map { MenuBarItem(title: itemTitle($0), element: $0) })
+        return .items(items)
     }
 
-    private enum CopyFailure: CustomStringConvertible {
+    private enum CopyFailure: Error, CustomStringConvertible {
         case axError(AXError)
         case wrongType
 

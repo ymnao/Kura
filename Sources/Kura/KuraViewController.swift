@@ -8,6 +8,7 @@ final class AppNode {
     let app: RegisteredApp
     var result: ScanResult?
     var scanTask: Task<Void, Never>?
+    var scanGeneration: Int = 0
     fileprivate let statusRow = StatusRow()
 
     init(_ app: RegisteredApp) {
@@ -165,6 +166,7 @@ final class KuraViewController: NSViewController {
             let node = nodeCache[app.bundleIdentifier].map { $0.app == app ? $0 : AppNode(app) } ?? AppNode(app)
             node.scanTask?.cancel()
             node.scanTask = nil
+            node.scanGeneration &+= 1
             node.result = nil
             node.statusRow.text = "読込中…"
             nodeCache[app.bundleIdentifier] = node
@@ -182,9 +184,11 @@ final class KuraViewController: NSViewController {
 
     private func scanIfNeeded(_ node: AppNode) {
         guard node.result == nil, node.scanTask == nil else { return }
+        let generation = node.scanGeneration
         node.scanTask = Task.detached(priority: .userInitiated) { [weak self] in
             let result = MenuBarScanner.scan(node.app)
             await MainActor.run {
+                guard node.scanGeneration == generation else { return }
                 node.scanTask = nil
                 if Task.isCancelled { return }
                 node.result = result
