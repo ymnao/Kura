@@ -136,7 +136,9 @@ final class KuraViewController: NSViewController {
         observerToken = NotificationCenter.default.addObserver(
             forName: RegistrationStore.didChange, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.reload()
+            Task { @MainActor in
+                self?.reload()
+            }
         }
     }
 
