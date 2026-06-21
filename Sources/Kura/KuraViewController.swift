@@ -1,15 +1,13 @@
 import AppKit
 
-private final class EmptyRow {
-    static let shared = EmptyRow()
-    private init() {}
-}
+fileprivate final class EmptyRow {}
 
 final class AppNode {
     let app: RegisteredApp
     var items: [MenuBarItem]?
     var isScanning: Bool = false
     var scanGeneration: Int = 0
+    fileprivate let placeholder = EmptyRow()
 
     init(_ app: RegisteredApp) {
         self.app = app
@@ -221,7 +219,7 @@ extension KuraViewController: NSOutlineViewDataSource {
         let node = item as! AppNode
         let items = node.items ?? []
         if items.isEmpty {
-            return EmptyRow.shared
+            return node.placeholder
         }
         return items[index]
     }
