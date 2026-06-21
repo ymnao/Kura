@@ -1,13 +1,14 @@
 import AppKit
 
-fileprivate final class EmptyRow {}
+fileprivate final class StatusRow {
+    var text: String = "読込中…"
+}
 
 final class AppNode {
     let app: RegisteredApp
-    var items: [MenuBarItem]?
-    var isScanning: Bool = false
-    var scanGeneration: Int = 0
-    fileprivate let placeholder = EmptyRow()
+    var result: ScanResult?
+    var scanTask: Task<Void, Never>?
+    fileprivate let statusRow = StatusRow()
 
     init(_ app: RegisteredApp) {
         self.app = app
@@ -155,38 +156,51 @@ final class KuraViewController: NSViewController {
         if let token = observerToken {
             NotificationCenter.default.removeObserver(token)
         }
+        nodeCache.values.forEach { $0.scanTask?.cancel() }
     }
 
     private func reload() {
         let apps = RegistrationStore.shared.registeredApps
         appNodes = apps.map { app in
             let node = nodeCache[app.bundleIdentifier].map { $0.app == app ? $0 : AppNode(app) } ?? AppNode(app)
-            node.items = nil
-            node.isScanning = false
-            node.scanGeneration &+= 1
+            node.scanTask?.cancel()
+            node.scanTask = nil
+            node.result = nil
+            node.statusRow.text = "読込中…"
             nodeCache[app.bundleIdentifier] = node
             return node
         }
         let activeIds = Set(apps.map { $0.bundleIdentifier })
-        nodeCache = nodeCache.filter { activeIds.contains($0.key) }
+        for (key, node) in nodeCache where !activeIds.contains(key) {
+            node.scanTask?.cancel()
+            nodeCache.removeValue(forKey: key)
+        }
 
         outlineView.reloadData()
         emptyLabel.isHidden = !appNodes.isEmpty
     }
 
     private func scanIfNeeded(_ node: AppNode) {
-        guard node.items == nil, !node.isScanning else { return }
-        node.isScanning = true
-        let generation = node.scanGeneration
-        DispatchQueue.global(qos: .userInitiated).async {
-            let items = MenuBarScanner.scan(node.app)
-            DispatchQueue.main.async { [weak self] in
-                guard node.scanGeneration == generation else { return }
-                node.items = items
-                node.isScanning = false
+        guard node.result == nil, node.scanTask == nil else { return }
+        node.scanTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let result = MenuBarScanner.scan(node.app)
+            await MainActor.run {
+                node.scanTask = nil
+                if Task.isCancelled { return }
+                node.result = result
+                node.statusRow.text = Self.statusText(for: result)
                 guard let self = self, self.appNodes.contains(where: { $0 === node }) else { return }
                 self.outlineView.reloadItem(node, reloadChildren: true)
             }
+        }
+    }
+
+    private static func statusText(for result: ScanResult) -> String {
+        switch result {
+        case .notRunning: return "起動していません"
+        case .failed(let reason): return "走査失敗: \(reason)"
+        case .items(let items) where items.isEmpty: return "メニュー項目なし"
+        case .items: return ""
         }
     }
 
@@ -207,7 +221,10 @@ extension KuraViewController: NSOutlineViewDataSource {
         }
         if let node = item as? AppNode {
             scanIfNeeded(node)
-            return max(node.items?.count ?? 0, 1)
+            if case .items(let items) = node.result, !items.isEmpty {
+                return items.count
+            }
+            return 1
         }
         return 0
     }
@@ -217,11 +234,10 @@ extension KuraViewController: NSOutlineViewDataSource {
             return appNodes[index]
         }
         let node = item as! AppNode
-        let items = node.items ?? []
-        if items.isEmpty {
-            return node.placeholder
+        if case .items(let items) = node.result, !items.isEmpty {
+            return items[index]
         }
-        return items[index]
+        return node.statusRow
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
@@ -241,9 +257,9 @@ extension KuraViewController: NSOutlineViewDelegate {
             cell.configure(title: menuItem.title, isPlaceholder: false)
             return cell
         }
-        if item is EmptyRow {
+        if let status = item as? StatusRow {
             let cell: MenuItemRowView = dequeue(Self.itemCellId)
-            cell.configure(title: "(メニュー項目なし)", isPlaceholder: true)
+            cell.configure(title: status.text, isPlaceholder: true)
             return cell
         }
         return nil
