@@ -9,8 +9,9 @@ enum AccessibilityPermission {
     @discardableResult
     static func requestIfNeeded() -> Bool {
         if isTrusted { return true }
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        let options = [key: true] as CFDictionary
+        // kAXTrustedCheckOptionPrompt は Unmanaged<CFString> で Swift 6 strict-concurrency 下で扱いが
+        // 不便。値は public な定数文字列 "AXTrustedCheckOptionPrompt" で安定しているので直接使う。
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
     }
 

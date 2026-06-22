@@ -48,12 +48,13 @@
 ```
 Sources/Kura/
 ├── KuraApp.swift                 エントリポイント（@main struct, @MainActor 隔離）
-├── AppDelegate.swift             NSStatusItem (本体 + セパレータ) / NSPopover の組み立て、折りたたみ
-├── KuraViewController.swift      ポップオーバーの NSOutlineView UI
-├── MenuBarLayoutScanner.swift    全アプリの NSStatusItem 座標から蔵対象を列挙
-├── MenuBarScanner.swift          AXUIElement で対象アプリの項目を列挙
+├── AppDelegate.swift             NSStatusItem (本体 + セパレータ) / NSPopover の組み立て、折りたたみ、scan キャッシュ
+├── KuraViewController.swift      ポップオーバーの NSOutlineView UI（表示専用）
+├── MenuBarLayoutScanner.swift    全アプリの NSStatusItem 座標から蔵対象を列挙（StatusBarApp / ScanLayoutResult）
+├── MenuBarScanner.swift          AXMenuBarItem 配下のメニューを 3 階層走査、単項目チェーン collapse
 ├── MenuBarDispatcher.swift       AXPress で項目を発火
-├── MenuBarItem.swift             ScanResult / MenuBarItem 値型
+├── MenuBarItem.swift             ScanResult / MenuBarItem 値型（children, isMenuItem を持つ階層構造）
+├── AXHelpers.swift               AX (Accessibility) API の共有ラッパ
 └── AccessibilityPermission.swift AX 権限の確認・要求・設定起動
 ```
 
@@ -68,11 +69,11 @@ Sources/Kura/
 代わりに Hidden Bar と同じ **2 NSStatusItem 方式** を採用:
 
 - **蔵本体** (`statusItem`): 通常 `variableLength`、常に右端側に表示。「蔵」テキスト表示
-- **セパレータ** (`separatorItem`): 通常 `length=8`（薄い縦線アイコン）。折りたたみ時 `length=max(500, min(screenWidth*2, 10000))` で膨張、左隣のアイコンを押し出す
+- **セパレータ** (`separatorItem`): 通常 `length=8`（薄い縦線アイコン）。折りたたみ時 `length=max(500, min(screenWidth, 10000))` で膨張、左隣のアイコンを押し出す（画面幅相当で十分。`screenWidth*2` だと OS のメニューバー再レイアウトが重い）
 
 ```
 展開:  [Alfred][｜][蔵]            ← セパレータ length=8
-折畳:                  [蔵]        ← セパレータ length=4000+、その左は画面外
+折畳:                  [蔵]        ← セパレータ length≒screenWidth、その左は画面外
 ```
 
 両 NSStatusItem は `autosaveName`（`kura.main` / `kura.separator`）で位置を永続化。初回起動時はユーザーが ⌘+ドラッグで「セパレータを蔵の左」に並べ替える必要がある。
@@ -95,16 +96,42 @@ Sources/Kura/
 「蔵に入れる対象アプリ」のリストは持たず、**蔵より左にある NSStatusItem を持つアプリ = 蔵の対象** と定義する。
 
 - ユーザーが ⌘+ドラッグで隠したいアイコンを蔵の左に置く
-- Kura は `kAXPositionAttribute` で各 NSStatusItem の座標を読み、蔵自身の座標（`statusItem.button?.window?.frame.minX`）と比較
-- `x < kuraX && x > 0` のものを蔵対象として列挙
-- `x <= 0` は Control Center のドロップダウン hidden item や画面外の NSStatusItem を除外するためのフィルタ
-- ポップオーバーで各アプリの AXExtrasMenuBar 配下メニューを表示・AXPress で発火
+- Kura は `kAXPositionAttribute` で各 NSStatusItem のグローバルスクリーン座標 (CGPoint) を読み、蔵自身の座標と比較
+- **蔵が乗っているスクリーンの `frame.contains(point)`（X/Y 両方）** かつ **蔵より左 (`p.x < kuraX`)** かつ **(0,0) でない（hidden item 除外）** のものを蔵対象として列挙
+- 上下隣接ディスプレイは X 範囲が重なるため X だけで判定すると誤検出する。CGPoint 全体で frame contains 判定して別ディスプレイの正常な要素を確実に除外する
+- **座標系の変換**: `kAXPositionAttribute` は主画面左上原点 (Y 下向き)、`NSScreen.frame` は AppKit 左下原点 (Y 上向き) なので、AppDelegate 側で AppKit→AX 変換した `kuraScreenFrameInAX` を渡す（`y = mainScreenHeight - frame.origin.y - frame.height`）。これを怠ると上下配置のマルチディスプレイで Y 範囲が反転して誤判定する
+- 同じアプリが NSStatusItem を複数持ち、一部だけ蔵の左にあるケースに備え、`StatusBarApp.menuBarIndices` に「対象 NSStatusItem の AXExtrasMenuBar 内インデックス」を記録する。`MenuBarScanner.scan` はこの index で children をフィルタするので、折りたたみ中（対象アイコンが画面外で x≦0）でも正しい NSStatusItem だけを走査できる（位置依存しない識別）
+- `StatusBarApp.menuBarItemCount` で AXExtrasMenuBar 子要素の総数を併用し、scan 時に children 数が一致しなければ layout drift として `.failed` を返す（折りたたみ中にアプリが NSStatusItem を追加/削除した場合の誤識別を防ぐ）
+- ポップオーバーで各アプリの AXExtrasMenuBar 配下メニューを **3 階層 (AXMenu/AXMenuItem を再帰)** で表示
+- **AXMenuItem を直接 AXPress** することで、対象アプリのアイコンを画面に戻さずアクション発火できる（折りたたみ中もアイコン非表示のまま操作可能）
+- ただし一部のアプリ（例: Claude）は AX にメニュー情報を一切公開しない（AXMenuBarItem のみで children が空）。あるいは AXMenuItem まで取れても sub-menu が AX lazy loading で取れない。これらの場合 cache が「単一 leaf 項目」になるため `needsExpandToFire = true` を立てる
+- `needsExpandToFire` の項目は UI に **「（折りたたみ非対応）」と表示** し、折りたたみ中はクリックを無効化する。展開時は通常通り AXPress で動作（メニュー UI がアイコン位置 = 画面内に開く）。「隠す」目的を保つため自動展開はしない — ユーザーが必要に応じて手動で「展開する」を選ぶフロー
+- `MenuBarItem.statusItemElement` には親 AXMenuBarItem を保存しておき、`MenuBarDispatcher` が AXPress 時にこれを優先使用する。これにより展開時のクリックでアプリの本物 NSMenu が確実にアイコン位置に開く（個別 AXMenuItem への AXPress が失敗するアプリでも動作する）
+- root レベルが単項目チェーン（例: アプリ直下に AXMenuBarItem 1 個だけ）の場合は短絡して、実質的なメニュー項目を AppNode 直下に昇格表示する
 
 これにより「擬似的に非表示」と「蔵に入っている」が**構造的に一致**する。RegistrationStore（明示的な登録設定）は v0.4 で廃止。
 
 ### スキャンタイミング
 
-ポップオーバーを開く度に `MenuBarLayoutScanner.scanLeftOfKura(kuraX:)` を `Task.detached` で実行する。AX 呼び出しは `messagingTimeout = 1.0` 秒で同期だが、`runningApplications` 全数走査になるためメインスレッドはブロックしない設計。
+scan は **AppDelegate が単一データソースとして管理**（`lastScanResult`）:
+
+- **起動時**: 0.5 / 2 / 5 / 10 秒後に warmup scan を kick（権限プロンプト中の遅延に対応、成功時は以降スキップ）
+- **ポップオーバーを開く度**: 展開中なら裏で再 scan、結果は `lastScanResult` に反映
+- **右クリックメニュー表示時**: scan を kick（メニュー操作の数百 ms の間に裏で完了させ、「折りたたむ」実行時に最新の cache がある状態を狙う）
+- **scan 完了時**: ポップオーバーが閉じていても VC に反映し、`KuraViewController.setTargets` 内で全 AppNode のメニュー詳細 scan も事前 kick（折りたたみ中はアプリの AX children が取れない場合があるため、折りたたみ前の cache 化が重要）
+- **`setTargets` の cache 戦略**: 展開中は呼ばれる度に cache をリセットして再 scan（最新化）。折りたたみ中は cache を保持し、再 scan しない（folded で AX children が取れないアプリの cache を破壊しないため）
+- **折りたたみ時**: 進行中の scan task をすべて `await` で完了を待ってから `commitFold` で folded。
+  - AppDelegate.scanTask（位置情報スキャン）
+  - 各 AppNode の scanTask（メニュー詳細スキャン）
+  - Claude のような「メニューが画面外だと AX children を返さない」アプリの cache を折りたたみ前に確定させる必要があるため両方を待つ
+  - `isCommittingFold` フラグで折りたたみコミット待ち中は **新規 scan kick を抑止** し、待っている scan task が差し替わる競合を防ぐ。同じく toggleFold 自体も二重起動を防止
+  - scan 完了後に「**最新の layout scan が `.items` かつ failedBundleIds が空**」「**全 AppNode の詳細 scan が `.items`**」の両方を確認。過去の成功フラグではなく直近の結果で判定するため、後から権限取り消しや一時失敗が起きた場合も folded をキャンセルし、alert でユーザーに通知。部分失敗 (failedBundleIds に bundle が積まれている) でも folded をブロック（初回 scan で失敗した bundle は cache 未確立のまま隠れて操作不能になるため）
+- **世代管理**: `scanGeneration` で古い scan の完了が新しい結果を上書きしないよう守る
+- **権限/キャンセル/部分成功の区別**: `ScanLayoutResult` は `.unauthorized` / `.cancelled` / `.items(apps, failedBundleIds)` を返す。`failedBundleIds` には AX 一時失敗 (`cannotComplete` 等) を起こした bundle が積まれ、AppDelegate 側で「失敗 bundle は前回キャッシュから保持、それ以外は新結果で置換」とマージする（同 bundleId が apps 側にも入っているケースでは重複を避けるため成功側を優先）。一時失敗が残る間は `didCompleteAuthorizedScan` を立てず warmup を継続する。これにより無関係なアプリの 1 件の不調で全体停止しないし、ユーザーが対象を蔵の右に移動した正常な反映も妨げない
+- **scan 成功フラグ**: `didCompleteAuthorizedScan` を別に持ち、warmup の重複 kick をスキップ（「lastScanResult が空」では正常な空と未認可を区別できないため）
+- **キャンセル協調**: `scanLeftOfKura` は loop 内で `Task.isCancelled` を確認し、cancel signal を受けたら早期 `.cancelled` を返す
+
+AX 呼び出しは `messagingTimeout = 1.0` 秒で同期だが、`Task.detached` で実行するためメインスレッドはブロックされない。
 
 ## 制約と妥協
 
@@ -112,6 +139,8 @@ Sources/Kura/
 - **アイコンの自動再配置はできない** — `kAXPositionAttribute` は読めるが、他アプリの NSStatusItem には書けない（`isAttributeSettable` が false）。ユーザーが ⌘+ドラッグで手動配置
 - **macOS システム純正アイコン（時計・コントロールセンター等）は隠せない** — 蔵より右端側に固定配置されているため
 - **新規 NSStatusItem は既存項目の左に出現する**（macOS 11+ 仕様、autosaveName で位置記憶しているアプリは前回位置）— 位置ベース設計では「新規アプリが自動的に蔵入り」する挙動になる
+- **NSStatusItem の同 count 入れ替えは検出できない** — AX レイヤーには NSStatusItem の安定した identity がない。`AXTitle`/`AXDescription` は表示として正常に変化する（時刻、進捗、未読数等）ため fingerprint に使えず、`AXIdentifier` を設定しているアプリは少ない。fail-safe として「複数 NSStatusItem を持ち一部だけ対象」のアプリでは `isExecutable = false` で AXPress を抑止する（メニュー項目は disabled 表示）。「NSStatusItem 1 個のみ」または「全 NSStatusItem が対象」のアプリは並び替えがあっても安全なので通常通り操作可能
+- **同 bundleId の複数プロセスは非対応** — `byBundle` / `nodeCache` が bundleId キーのため、2 プロセス目以降は静かに上書きされる。実用上ほぼ無いケースとして許容
 
 ## なぜ画面録画権限を避けるのか
 
@@ -122,7 +151,7 @@ Sources/Kura/
 
 ## ロードマップ
 
-- **v0.4** (完了): 蔵 1 個方式で length 膨張による折りたたみ実装 + 右クリックメニューに「折りたたむ／展開する」追加 + 位置ベース対象スキャナ（全アプリの AXExtrasMenuBar を列挙して蔵座標と比較）+ RegistrationStore 廃止
+- **v0.4** (完了): セパレータ方式の折りたたみ実装（2 NSStatusItem）+ 右クリックメニューに「折りたたむ／展開する」追加 + 位置ベース対象スキャナ + 3 階層メニュー走査と単項目チェーン collapse + RegistrationStore 廃止
 - **v0.5**: ホットキー対応（Carbon `RegisterEventHotKey`）、開閉アニメーション、ノッチ裏アイコンの自動検出表示
 
 ## 未来の検討事項

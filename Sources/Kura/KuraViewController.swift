@@ -1,15 +1,21 @@
 import AppKit
 
-/// AppDelegate に折りたたみ状態を問い合わせるための contract。
+/// AppDelegate に折りたたみ状態を問い合わせ、必要に応じて展開を要求するための contract。
 @MainActor
 protocol FoldController: AnyObject {
     var isFolded: Bool { get }
+    /// AX cache 不完全な項目（needsExpandToFire）クリック時の選択的自動展開で使用。
+    func expandIfFolded()
 }
 
 fileprivate final class StatusRow {
     var text: String = "読込中…"
 }
 
+/// MainActor 上でのみ生成・更新される。scan の Task.detached には AppNode 自体を渡さず、
+/// 値型の StatusBarApp と generation だけを渡し、完了時に bundleId で再 lookup する設計。
+/// 自身が解放される時に scanTask を自動キャンセルすることで、KuraViewController.deinit から
+/// nodeCache を触る必要をなくす（nonisolated deinit から @MainActor property を触る Swift 6 エラーを回避）。
 final class AppNode {
     let app: StatusBarApp
     var result: ScanResult?
@@ -19,6 +25,10 @@ final class AppNode {
 
     init(_ app: StatusBarApp) {
         self.app = app
+    }
+
+    deinit {
+        scanTask?.cancel()
     }
 }
 
@@ -149,17 +159,48 @@ final class KuraViewController: NSViewController {
         updatePermissionBanner()
     }
 
+    /// 進行中の全 AppNode のメニュー詳細 scan が完了するまで待ち、すべて .items（成功）かを返す。
+    /// 折りたたみコミット前の判定に使う: いずれかが .failed/.notRunning なら cache 不完全のまま
+    /// folded すると蔵から操作できなくなるため、folded をキャンセルすべき。
+    func waitForAllScansAndCheckSuccess() async -> Bool {
+        let tasks = appNodes.compactMap { $0.scanTask }
+        for task in tasks {
+            _ = await task.value
+        }
+        for node in appNodes {
+            switch node.result {
+            case .items: continue
+            case .failed, .notRunning, nil: return false
+            }
+        }
+        return true
+    }
+
     /// AppDelegate から「これを表示せよ」と渡される。VC は scan しない。
+    /// 折りたたみ中はメニュー詳細を取り直さない（アイコンが画面外で AX children が取れない
+    /// アプリの cache を破壊しないため）。展開中のみ cache をリフレッシュして最新化する。
     func setTargets(_ apps: [StatusBarApp]) {
         loadViewIfNeeded()
         updatePermissionBanner()
+        let folded = foldController?.isFolded ?? false
         appNodes = apps.map { app in
-            let node = nodeCache[app.bundleIdentifier].map { $0.app == app ? $0 : AppNode(app) } ?? AppNode(app)
-            node.scanTask?.cancel()
-            node.scanTask = nil
-            node.scanGeneration &+= 1
-            node.result = nil
-            node.statusRow.text = "読込中…"
+            let cached = nodeCache[app.bundleIdentifier]
+            let node: AppNode
+            if let cached, cached.app == app {
+                node = cached
+                // 折りたたみ中は cache 保持。展開中だけ result をリセットして再 scan する。
+                if !folded {
+                    node.scanTask?.cancel()
+                    node.scanTask = nil
+                    node.scanGeneration &+= 1
+                    node.result = nil
+                    node.statusRow.text = "読込中…"
+                }
+            } else {
+                // 別アプリに入れ替わった場合は cache 破棄して新規ノード
+                cached?.scanTask?.cancel()
+                node = AppNode(app)
+            }
             nodeCache[app.bundleIdentifier] = node
             return node
         }
@@ -170,6 +211,15 @@ final class KuraViewController: NSViewController {
         }
         outlineView.reloadData()
         emptyLabel.isHidden = !appNodes.isEmpty
+        // 折りたたみ中はアプリのアイコンが画面外で AX children を取得できないアプリが
+        // 存在する（メニューを開いた時にしか children を提供しないアプリ等）。
+        // 折りたたみ前の今のうちに全 AppNode のメニュー詳細を scan して cache 化しておく。
+        // 折りたたみ中はキックしない（result も保持されているのでそのまま再利用）。
+        if !folded {
+            for node in appNodes {
+                scanIfNeeded(node)
+            }
+        }
     }
 
     private func updatePermissionBanner() {
@@ -183,31 +233,58 @@ final class KuraViewController: NSViewController {
     @objc private func outlineViewClicked(_ sender: Any?) {
         let row = outlineView.clickedRow
         guard row >= 0, let item = outlineView.item(atRow: row) as? MenuBarItem else { return }
-        // 折りたたみ中 + AXMenuBarItem（NSStatusItem アイコン自体）クリックは AXPress するとアイコンが
-        // 画面に戻ってしまうのでスキップ。AXMenuItem（メニュー項目）は直接アクション発火で
-        // アイコン展開を伴わないので folded 中も操作可能。
-        if foldController?.isFolded == true && !item.isMenuItem {
+        let folded = foldController?.isFolded ?? false
+        // 子を持つ行（サブメニュー）は展開/折りたたみで開閉。葉のみ AXPress で発火する。
+        if !item.children.isEmpty {
+            if outlineView.isItemExpanded(item) {
+                outlineView.collapseItem(item)
+            } else {
+                outlineView.expandItem(item)
+            }
             return
         }
+        guard item.isExecutable else { return }
+        // 折りたたみ中 + cache 不完全（needsExpandToFire）は「折りたたみ非対応」として無効化。
+        // 自動展開すると「隠す」目的が崩れるため、ユーザーが手動で展開してから操作する流れに統一。
+        if folded && item.needsExpandToFire {
+            NSLog("[Kura] click: needsExpandToFire while folded → skip (unsupported)")
+            return
+        }
+        // 折りたたみ中 + AXMenuBarItem（NSStatusItem アイコン自体）クリックは AXPress でアイコンが
+        // 画面に戻ってしまうのでスキップ。
+        if folded && !item.isMenuItem {
+            NSLog("[Kura] click: folded+AXMenuBarItem → skip")
+            return
+        }
+        NSLog("[Kura] click: direct press")
         onItemActivated?()
         MenuBarDispatcher.press(item)
     }
 
-    deinit {
-        nodeCache.values.forEach { $0.scanTask?.cancel() }
-    }
+    // VC が解放されると appNodes / nodeCache の AppNode も解放されるため、
+    // 各 AppNode.deinit が自身の scanTask をキャンセルしてくれる。deinit から
+    // nodeCache を触ると Swift 6 strict-concurrency でエラーになるため明示的な deinit は不要。
 
     private func scanIfNeeded(_ node: AppNode) {
         guard node.result == nil, node.scanTask == nil else { return }
         let generation = node.scanGeneration
+        // Task.detached には value 型 (StatusBarApp) と generation のみ渡す。
+        // AppNode 参照を持ち出さないので、MainActor からの隔離が型レベルで保たれる。
+        let app = node.app
         node.scanTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let result = MenuBarScanner.scan(node.app)
-            await self?.handleScanCompletion(node: node, generation: generation, result: result)
+            let result = MenuBarScanner.scan(app)
+            await self?.handleScanCompletion(app: app, generation: generation, result: result)
         }
     }
 
-    private func handleScanCompletion(node: AppNode, generation: Int, result: ScanResult) {
-        guard node.scanGeneration == generation else { return }
+    /// 完了結果を反映する条件は「同じ bundleId のノードが現存」「ノードの app が値として一致」
+    /// 「generation も一致」の 3 点。PID 変更や対象 index 変更で新ノードに入れ替わった場合、
+    /// 新ノードは generation = 1 で始まるため、旧 Task (同じく generation = 1) の完了で
+    /// 新ノードを汚染するリスクがある。app を value 比較することでこれを防ぐ。
+    private func handleScanCompletion(app: StatusBarApp, generation: Int, result: ScanResult) {
+        guard let node = nodeCache[app.bundleIdentifier],
+              node.app == app,
+              node.scanGeneration == generation else { return }
         node.scanTask = nil
         node.result = result
         node.statusRow.text = Self.statusText(for: result)
@@ -286,7 +363,12 @@ extension KuraViewController: NSOutlineViewDelegate {
         }
         if let menuItem = item as? MenuBarItem {
             let cell: MenuItemRowView = dequeue(Self.itemCellId)
-            cell.configure(title: menuItem.title, isPlaceholder: false)
+            cell.configure(
+                title: menuItem.title,
+                isPlaceholder: false,
+                isExecutable: menuItem.isExecutable,
+                needsExpandToFire: menuItem.needsExpandToFire
+            )
             return cell
         }
         if let status = item as? StatusRow {
@@ -366,8 +448,18 @@ final class MenuItemRowView: NSTableCellView {
         ])
     }
 
-    func configure(title: String, isPlaceholder: Bool) {
-        titleLabel.stringValue = title
-        titleLabel.textColor = isPlaceholder ? .tertiaryLabelColor : .secondaryLabelColor
+    func configure(title: String, isPlaceholder: Bool, isExecutable: Bool = true, needsExpandToFire: Bool = false) {
+        if needsExpandToFire {
+            // AX にメニュー情報を公開しないアプリ（Claude 等）。折りたたみ中は操作不能、
+            // 展開状態でのみ動作する。ユーザーが事前に把握できるようマーキングする。
+            titleLabel.stringValue = "\(title)（折りたたみ非対応）"
+            titleLabel.textColor = .tertiaryLabelColor
+        } else if isPlaceholder || !isExecutable {
+            titleLabel.stringValue = title
+            titleLabel.textColor = .tertiaryLabelColor
+        } else {
+            titleLabel.stringValue = title
+            titleLabel.textColor = .secondaryLabelColor
+        }
     }
 }
