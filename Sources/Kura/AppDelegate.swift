@@ -43,11 +43,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
     /// 180ms はメニューバー再レイアウトの体感コストとフィードバックの分かりやすさのバランス点。
     private static let foldAnimationDuration: TimeInterval = 0.18
     private static let foldAnimationFrameInterval: TimeInterval = 1.0 / 60.0
+    private struct FoldAnimation {
+        let startTime: CFTimeInterval
+        let startLength: CGFloat
+        var targetLength: CGFloat
+    }
     private var animationTimer: Timer?
-    private var animationStartTime: CFTimeInterval = 0
-    private var animationStartLength: CGFloat = 0
-    private var animationTargetLength: CGFloat = 0
-    private var animationDuration: TimeInterval = 0
+    private var animation: FoldAnimation?
 
     var isFolded: Bool {
         separatorItem.length > Self.expandedSeparatorLength
@@ -128,11 +130,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
 
     @objc private func handleScreenParametersChanged() {
         let newCollapsed = Self.collapsedSeparatorLength
-        if animationTimer != nil {
+        if animation != nil {
             // アニメ中は target を更新するだけ。展開方向 (target=expanded) のアニメは触らない
             // ことで「展開しようとしていたら勝手に折りたたみに転じる」を防ぐ。
-            if animationTargetLength > Self.expandedSeparatorLength {
-                animationTargetLength = newCollapsed
+            if let target = animation?.targetLength, target > Self.expandedSeparatorLength {
+                animation?.targetLength = newCollapsed
             }
         } else if isFolded {
             separatorItem.length = newCollapsed
@@ -142,12 +144,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
     /// separatorItem.length をフレーム駆動で補間する。NSStatusItem は NSAnimatablePropertyContainer 非準拠
     /// なので animator() プロキシは使えず、Timer で手動補間する。
     /// 進行中のアニメは invalidate して新規アニメに差し替えるので、向きが変わるトグル連打にも追随する。
-    private func animateSeparatorLength(to targetLength: CGFloat, duration: TimeInterval = AppDelegate.foldAnimationDuration) {
+    private func animateSeparatorLength(to targetLength: CGFloat) {
         animationTimer?.invalidate()
-        animationStartLength = separatorItem.length
-        animationTargetLength = targetLength
-        animationStartTime = CACurrentMediaTime()
-        animationDuration = duration
+        animation = FoldAnimation(
+            startTime: CACurrentMediaTime(),
+            startLength: separatorItem.length,
+            targetLength: targetLength
+        )
         // RunLoop.common に追加することで、右クリックメニュー表示中などの tracking mode 中もアニメ継続。
         let timer = Timer(
             timeInterval: Self.foldAnimationFrameInterval,
@@ -161,19 +164,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
     }
 
     @objc private func tickAnimation() {
-        let elapsed = CACurrentMediaTime() - animationStartTime
-        let progress = min(max(elapsed / animationDuration, 0), 1)
-        if progress >= 1 {
-            separatorItem.length = animationTargetLength
+        guard let anim = animation else {
             animationTimer?.invalidate()
             animationTimer = nil
+            return
+        }
+        let elapsed = CACurrentMediaTime() - anim.startTime
+        let progress = min(max(elapsed / Self.foldAnimationDuration, 0), 1)
+        if progress >= 1 {
+            separatorItem.length = anim.targetLength
+            animationTimer?.invalidate()
+            animationTimer = nil
+            animation = nil
             return
         }
         // easeInOutQuad: 慣性のある自然な動きで、メニューバー再レイアウト負荷も中央でピーク。
         let eased: Double = progress < 0.5
             ? 2 * progress * progress
             : 1 - pow(-2 * progress + 2, 2) / 2
-        separatorItem.length = animationStartLength + (animationTargetLength - animationStartLength) * CGFloat(eased)
+        separatorItem.length = anim.startLength + (anim.targetLength - anim.startLength) * CGFloat(eased)
     }
 
     private func setupPopover() {

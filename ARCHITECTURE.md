@@ -126,14 +126,14 @@ Sources/Kura/
 #### 状態管理
 
 - `animationTimer: Timer?` で進行中アニメを保持。新規アニメ開始時に `invalidate()` して差し替え可能（向きが変わるトグル連打にも追随）
-- `animationStartTime` (CACurrentMediaTime ベース) / `animationStartLength` / `animationTargetLength` / `animationDuration` で補間状態を保持
-- アニメ完了時は `animationTargetLength` に明示スナップして丸め誤差を排除
+- `animation: FoldAnimation?`（`startTime` / `startLength` / `targetLength`）で補間状態を保持。`targetLength` のみ `var` で screen 変化時の動的更新を許容
+- アニメ完了時は `targetLength` に明示スナップして丸め誤差を排除
 
 #### 画面構成変更との衝突回避
 
 `handleScreenParametersChanged()` はアニメ中だと next-frame で上書きされてしまうため、以下のロジックで分岐:
 
-- アニメ中で **target が折りたたみ方向** (`> expandedSeparatorLength`): `animationTargetLength` のみ更新（アニメは継続、新しい collapsed 値に向かう）
+- アニメ中で **target が折りたたみ方向** (`> expandedSeparatorLength`): `animation.targetLength` のみ更新（アニメは継続、新しい collapsed 値に向かう）
 - アニメ中で **target が展開方向** (`== expandedSeparatorLength`): 何もしない（展開しようとしていたら勝手に折りたたみに転じるのを防ぐ）
 - アニメ中でない、folded: 従来通り即時更新
 
