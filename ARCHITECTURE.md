@@ -150,10 +150,10 @@ Carbon `RegisterEventHotKey` は deprecated ではなく、macOS 14 でも安定
 
 ### `HotKeyManager` の役割
 
-- `init(keyCode:modifiers:handler:)` で 1 ホットキーを登録、`deinit` で `UnregisterEventHotKey` 解除
-- `InstallEventHandler` は共有（`sharedHandlerRef`）で 1 度だけ走らせ、同じ Carbon イベントハンドラ経由で複数 HotKey ID を識別
+- `init(keyCode:modifiers:handler:)` でホットキーを登録、`deinit` で `UnregisterEventHotKey` 解除
+- 単一ホットキー前提（Kura は ⌃⌥⌘K のみ使用）。複数ホットキーが必要になった時点で registry / ID 払い出しを足すのは trivial なので、現状は最小構成にしている
 - Carbon C callback は MainActor 隔離外で発火するため、`nonisolated static func dispatchHotKeyEvent` で受け、`DispatchQueue.main.async` + `MainActor.assumeIsolated` で MainActor に戻してから登録済みクロージャを呼ぶ
-- `registry: [UInt32: @MainActor () -> Void]` の closure 型は `@MainActor` を明示し、MainActor 隔離下でしか呼べないことを型レベルで強制
+- 保存する handler 型は `@MainActor () -> Void` を明示し、MainActor 隔離下でしか呼べないことを型レベルで強制
 
 ### ホットキーから `toggleFold(_:)` を呼ぶ設計
 

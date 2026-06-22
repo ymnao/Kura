@@ -133,14 +133,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
         popover.contentViewController = vc
     }
 
-    /// ⌃⌥⌘K で折りたたみ／展開トグル。`toggleFold(_:)` の既存ロジック（scan 待ち・
-    /// セパレータ位置チェック・alert 表示）をそのまま流用する。
-    /// 衝突しにくく覚えやすい組み合わせとして ⌃⌥⌘K を採用（macOS 標準 / 主要 IDE に既定なし）。
+    /// ⌃⌥⌘K で折りたたみ／展開トグル（詳細は ARCHITECTURE.md）。
     private func setupHotKey() {
-        let modifiers = UInt32(controlKey | optionKey | cmdKey)
         hotKeyManager = HotKeyManager(
             keyCode: UInt32(kVK_ANSI_K),
-            modifiers: modifiers
+            modifiers: UInt32(controlKey | optionKey | cmdKey)
         ) { [weak self] in
             self?.toggleFold(nil)
         }
