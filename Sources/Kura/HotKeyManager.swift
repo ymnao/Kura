@@ -23,9 +23,12 @@ final class HotKeyManager {
 
     /// ホットキーを登録。`keyCode` は Carbon の VK 定数（例: `kVK_ANSI_K`）、
     /// `modifiers` は `cmdKey | optionKey | controlKey` 等の bitwise OR。
-    /// 登録に失敗した場合は NSLog 警告を残して何もしない。
+    /// EventHandler 登録 or HotKey 登録のどちらかが失敗した場合は NSLog 警告を残して何もしない。
     init(keyCode: UInt32, modifiers: UInt32, handler: @escaping @MainActor () -> Void) {
-        Self.installSharedHandlerIfNeeded()
+        // EventHandler が無い状態で RegisterEventHotKey を呼ぶと、キーは OS に予約された
+        // まま誰にも処理されない「死んだホットキー」になる（他アプリにも届かなくなる）。
+        // ハンドラ登録に失敗した時点で諦める。
+        guard Self.installSharedHandlerIfNeeded() else { return }
 
         let signature: OSType = 0x4B555241 // 'KURA'
         let eventID = EventHotKeyID(signature: signature, id: 1)
@@ -51,8 +54,10 @@ final class HotKeyManager {
         }
     }
 
-    private static func installSharedHandlerIfNeeded() {
-        guard sharedHandlerRef == nil else { return }
+    /// 共有ハンドラの登録を一度だけ試す。既に登録済みなら true、今回成功しても true、
+    /// 失敗時のみ false を返す。呼び出し側はこの戻り値で「RegisterEventHotKey に進んで良いか」を判断する。
+    private static func installSharedHandlerIfNeeded() -> Bool {
+        if sharedHandlerRef != nil { return true }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                  eventKind: UInt32(kEventHotKeyPressed))
         let status = InstallEventHandler(GetApplicationEventTarget(),
@@ -63,7 +68,9 @@ final class HotKeyManager {
             1, &spec, nil, &sharedHandlerRef)
         if status != noErr {
             NSLog("[Kura] HotKey InstallEventHandler failed status=\(status)")
+            return false
         }
+        return true
     }
 
     /// Carbon callback は MainActor 外で呼ばれる可能性があるため nonisolated にして、
