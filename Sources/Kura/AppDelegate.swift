@@ -1,21 +1,25 @@
 import AppKit
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
     /// 蔵本体（左クリックでポップオーバー、右クリックでメニュー）
     private var statusItem: NSStatusItem!
     /// セパレータ（折りたたみ時に length 膨張、蔵の左に置かれる前提）
     private var separatorItem: NSStatusItem!
     private var popover: NSPopover!
 
+    /// 蔵対象アプリの単一データソース。AppDelegate がスキャンの責任を持ち、
+    /// 折りたたみ中も展開中も同じキャッシュを表示することで一貫性を保つ。
+    private var lastScanResult: [StatusBarApp] = []
+    private var scanTask: Task<Void, Never>?
+
     private static let expandedSeparatorLength: CGFloat = 8
-    /// macOS の NSStatusItem.length 上限は 10000pt。画面幅の 2 倍 (Hidden Bar 流) でクランプ。
     private static var collapsedSeparatorLength: CGFloat {
         let screenWidth = NSScreen.screens.map { $0.frame.width }.max() ?? 1728
         return max(500, min(screenWidth * 2, 10_000))
     }
 
-    private var isFolded: Bool {
+    var isFolded: Bool {
         separatorItem.length > Self.expandedSeparatorLength
     }
 
@@ -30,6 +34,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
+        // 起動 0.5 秒後に初回 scan を仕込む。権限プロンプト中は空になる可能性があるので
+        // ポップオーバー開時にも再 scan する設計でカバーする。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.startScan()
+        }
     }
 
     private func setupStatusItem() {
@@ -44,11 +53,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
-    /// セパレータ NSStatusItem。
-    /// - 通常時: length=expandedSeparatorLength（細い縦線、視認可能）
-    /// - 折りたたみ時: length=collapsedSeparatorLength（左隣のアイコンを画面外に押し出す）
-    /// length を効かせるためには button.image が必須（content がないと length が反映されない）。
-    /// 透明 image だと「ユーザーが ⌘+ドラッグで動かせない」ので、薄い縦線アイコンを使う（Hidden Bar 方式）。
     private func setupSeparatorItem() {
         separatorItem = NSStatusBar.system.statusItem(withLength: Self.expandedSeparatorLength)
         separatorItem.autosaveName = "kura.separator"
@@ -57,12 +61,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = Self.separatorImage
             button.imagePosition = .imageOnly
             button.title = ""
-            // セパレータはユーザーが間違ってクリックしても何も起きないように target/action を設定しない。
         }
     }
 
-    /// セパレータ用の薄い縦線 image (template image)。
-    /// ⌘+ドラッグでつかむためにある程度の幅とコントラストが必要。
     private static let separatorImage: NSImage = {
         let size = NSSize(width: 6, height: 18)
         let image = NSImage(size: size)
@@ -75,8 +76,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return image
     }()
 
-    /// 蔵がセパレータの右にあるか（=折りたたみが意味を持つ配置か）。
-    /// ユーザーが ⌘+ドラッグで「セパレータを蔵の左」に置く必要がある。
     private var isSeparatorOnLeftOfMain: Bool {
         guard let mainX = statusItem.button?.window?.frame.minX,
               let sepX = separatorItem.button?.window?.frame.minX else {
@@ -86,7 +85,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func handleScreenParametersChanged() {
-        // 折りたたみ中に画面構成が変わったら collapse length を計算し直す。
         if isFolded {
             separatorItem.length = Self.collapsedSeparatorLength
         }
@@ -100,7 +98,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         vc.onItemActivated = { [weak self] in
             self?.popover.performClose(nil)
         }
+        vc.foldController = self
         popover.contentViewController = vc
+    }
+
+    /// 非同期 scan。折りたたみ中は AX position が画面外で意味がないのでスキップ。
+    /// 完了時に lastScanResult を更新し、ポップオーバーが開いていれば反映する。
+    private func startScan() {
+        guard !isFolded else { return }
+        guard let button = statusItem.button else { return }
+        let kuraX = button.window?.frame.minX ?? -.greatestFiniteMagnitude
+        scanTask?.cancel()
+        scanTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let apps = MenuBarLayoutScanner.scanLeftOfKura(kuraX: kuraX)
+            await self?.applyScanResult(apps)
+        }
+    }
+
+    private func applyScanResult(_ apps: [StatusBarApp]) {
+        scanTask = nil
+        lastScanResult = apps
+        // ポップオーバーが開いていて、展開中なら表示も最新化
+        if popover.isShown, !isFolded,
+           let vc = popover.contentViewController as? KuraViewController {
+            vc.setTargets(apps)
+        }
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
@@ -119,8 +141,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
             if let vc = popover.contentViewController as? KuraViewController {
-                let kuraX = button.window?.frame.minX ?? -.greatestFiniteMagnitude
-                vc.refreshTargets(kuraX: kuraX)
+                // 折りたたみ中も展開中も lastScanResult を直接表示。
+                vc.setTargets(lastScanResult)
+                // 展開中だけ裏で scan を更新（ポップオーバー閉じる→開くで最新化）
+                if !isFolded {
+                    startScan()
+                }
             }
         }
     }
@@ -143,7 +169,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quitItem.target = self
         menu.addItem(quitItem)
 
-        // 通常メニューの自動有効化を切る（isEnabled の手動制御を効かせるため）
         menu.autoenablesItems = false
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
     }
@@ -153,9 +178,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             separatorItem.length = Self.expandedSeparatorLength
         } else {
             guard isSeparatorOnLeftOfMain else { return }
+            // キャッシュが空ならフォールバックで同期 scan を 1 回走らせる。
+            // これにより warmup が間に合わなかった場合でも folded 中の表示が必ず動く。
+            if lastScanResult.isEmpty, let button = statusItem.button {
+                let kuraX = button.window?.frame.minX ?? -.greatestFiniteMagnitude
+                lastScanResult = MenuBarLayoutScanner.scanLeftOfKura(kuraX: kuraX)
+            }
             separatorItem.length = Self.collapsedSeparatorLength
         }
-        NSLog("[Kura] toggleFold: isFolded=\(isFolded) sepLen=\(separatorItem.length)")
     }
 
     @objc private func quit(_ sender: Any?) {

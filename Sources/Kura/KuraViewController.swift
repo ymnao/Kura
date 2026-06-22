@@ -1,5 +1,11 @@
 import AppKit
 
+/// AppDelegate に折りたたみ状態を問い合わせるための contract。
+@MainActor
+protocol FoldController: AnyObject {
+    var isFolded: Bool { get }
+}
+
 fileprivate final class StatusRow {
     var text: String = "読込中…"
 }
@@ -27,10 +33,9 @@ final class KuraViewController: NSViewController {
 
     private var appNodes: [AppNode] = []
     private var nodeCache: [String: AppNode] = [:]
-    private var layoutTask: Task<Void, Never>?
-    private var kuraX: CGFloat = -.greatestFiniteMagnitude
 
     var onItemActivated: (() -> Void)?
+    weak var foldController: FoldController?
 
     private static let appCellId = NSUserInterfaceItemIdentifier("kura.appRow")
     private static let itemCellId = NSUserInterfaceItemIdentifier("kura.itemRow")
@@ -144,45 +149,10 @@ final class KuraViewController: NSViewController {
         updatePermissionBanner()
     }
 
-    /// AppDelegate からポップオーバー表示時に呼ばれる。蔵自身の現在の x 座標を渡す。
-    func refreshTargets(kuraX: CGFloat) {
+    /// AppDelegate から「これを表示せよ」と渡される。VC は scan しない。
+    func setTargets(_ apps: [StatusBarApp]) {
         loadViewIfNeeded()
-        self.kuraX = kuraX
         updatePermissionBanner()
-        reload()
-    }
-
-    private func updatePermissionBanner() {
-        bannerHeightConstraint.constant = AccessibilityPermission.isTrusted ? 0 : 32
-    }
-
-    @objc private func openAccessibilitySettings(_ sender: Any?) {
-        AccessibilityPermission.openSystemSettings()
-    }
-
-    @objc private func outlineViewClicked(_ sender: Any?) {
-        let row = outlineView.clickedRow
-        guard row >= 0, let item = outlineView.item(atRow: row) as? MenuBarItem else { return }
-        onItemActivated?()
-        MenuBarDispatcher.press(item)
-    }
-
-    deinit {
-        layoutTask?.cancel()
-        nodeCache.values.forEach { $0.scanTask?.cancel() }
-    }
-
-    private func reload() {
-        layoutTask?.cancel()
-        let x = kuraX
-        layoutTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let apps = MenuBarLayoutScanner.scanLeftOfKura(kuraX: x)
-            await self?.applyTargets(apps)
-        }
-    }
-
-    private func applyTargets(_ apps: [StatusBarApp]) {
-        layoutTask = nil
         appNodes = apps.map { app in
             let node = nodeCache[app.bundleIdentifier].map { $0.app == app ? $0 : AppNode(app) } ?? AppNode(app)
             node.scanTask?.cancel()
@@ -198,9 +168,33 @@ final class KuraViewController: NSViewController {
             node.scanTask?.cancel()
             nodeCache.removeValue(forKey: key)
         }
-
         outlineView.reloadData()
         emptyLabel.isHidden = !appNodes.isEmpty
+    }
+
+    private func updatePermissionBanner() {
+        bannerHeightConstraint.constant = AccessibilityPermission.isTrusted ? 0 : 32
+    }
+
+    @objc private func openAccessibilitySettings(_ sender: Any?) {
+        AccessibilityPermission.openSystemSettings()
+    }
+
+    @objc private func outlineViewClicked(_ sender: Any?) {
+        let row = outlineView.clickedRow
+        guard row >= 0, let item = outlineView.item(atRow: row) as? MenuBarItem else { return }
+        // 折りたたみ中 + AXMenuBarItem（NSStatusItem アイコン自体）クリックは AXPress するとアイコンが
+        // 画面に戻ってしまうのでスキップ。AXMenuItem（メニュー項目）は直接アクション発火で
+        // アイコン展開を伴わないので folded 中も操作可能。
+        if foldController?.isFolded == true && !item.isMenuItem {
+            return
+        }
+        onItemActivated?()
+        MenuBarDispatcher.press(item)
+    }
+
+    deinit {
+        nodeCache.values.forEach { $0.scanTask?.cancel() }
     }
 
     private func scanIfNeeded(_ node: AppNode) {
@@ -252,6 +246,9 @@ extension KuraViewController: NSOutlineViewDataSource {
             }
             return 1
         }
+        if let menuItem = item as? MenuBarItem {
+            return menuItem.children.count
+        }
         return 0
     }
 
@@ -259,15 +256,24 @@ extension KuraViewController: NSOutlineViewDataSource {
         if item == nil {
             return appNodes[index]
         }
-        let node = item as! AppNode
-        if case .items(let items) = node.result, !items.isEmpty {
-            return items[index]
+        if let node = item as? AppNode {
+            if case .items(let items) = node.result, !items.isEmpty {
+                return items[index]
+            }
+            return node.statusRow
         }
-        return node.statusRow
+        if let menuItem = item as? MenuBarItem {
+            return menuItem.children[index]
+        }
+        fatalError("unexpected outline parent: \(item ?? "nil")")
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        item is AppNode
+        if item is AppNode { return true }
+        if let menuItem = item as? MenuBarItem {
+            return !menuItem.children.isEmpty
+        }
+        return false
     }
 }
 
@@ -354,7 +360,7 @@ final class MenuItemRowView: NSTableCellView {
         addSubview(titleLabel)
 
         NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
         ])
