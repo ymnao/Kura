@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import QuartzCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
@@ -38,6 +39,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
         return max(500, min(screenWidth, 10_000))
     }
 
+    /// 開閉アニメーション設定。短すぎると瞬間遷移と区別しづらく、長すぎると操作の応答性が損なわれる。
+    /// 180ms はメニューバー再レイアウトの体感コストとフィードバックの分かりやすさのバランス点。
+    private static let foldAnimationDuration: TimeInterval = 0.18
+    private static let foldAnimationFrameInterval: TimeInterval = 1.0 / 60.0
+    private var animationTimer: Timer?
+    private var animationStartTime: CFTimeInterval = 0
+    private var animationStartLength: CGFloat = 0
+    private var animationTargetLength: CGFloat = 0
+    private var animationDuration: TimeInterval = 0
+
     var isFolded: Bool {
         separatorItem.length > Self.expandedSeparatorLength
     }
@@ -45,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
     /// FoldController 実装。cache 不完全な項目クリック時の選択的自動展開で使われる。
     func expandIfFolded() {
         if isFolded {
-            separatorItem.length = Self.expandedSeparatorLength
+            animateSeparatorLength(to: Self.expandedSeparatorLength)
         }
     }
 
@@ -116,9 +127,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
     }
 
     @objc private func handleScreenParametersChanged() {
-        if isFolded {
-            separatorItem.length = Self.collapsedSeparatorLength
+        let newCollapsed = Self.collapsedSeparatorLength
+        if animationTimer != nil {
+            // アニメ中は target を更新するだけ。展開方向 (target=expanded) のアニメは触らない
+            // ことで「展開しようとしていたら勝手に折りたたみに転じる」を防ぐ。
+            if animationTargetLength > Self.expandedSeparatorLength {
+                animationTargetLength = newCollapsed
+            }
+        } else if isFolded {
+            separatorItem.length = newCollapsed
         }
+    }
+
+    /// separatorItem.length をフレーム駆動で補間する。NSStatusItem は NSAnimatablePropertyContainer 非準拠
+    /// なので animator() プロキシは使えず、Timer で手動補間する。
+    /// 進行中のアニメは invalidate して新規アニメに差し替えるので、向きが変わるトグル連打にも追随する。
+    private func animateSeparatorLength(to targetLength: CGFloat, duration: TimeInterval = AppDelegate.foldAnimationDuration) {
+        animationTimer?.invalidate()
+        animationStartLength = separatorItem.length
+        animationTargetLength = targetLength
+        animationStartTime = CACurrentMediaTime()
+        animationDuration = duration
+        // RunLoop.common に追加することで、右クリックメニュー表示中などの tracking mode 中もアニメ継続。
+        let timer = Timer(
+            timeInterval: Self.foldAnimationFrameInterval,
+            target: self,
+            selector: #selector(tickAnimation),
+            userInfo: nil,
+            repeats: true
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        animationTimer = timer
+    }
+
+    @objc private func tickAnimation() {
+        let elapsed = CACurrentMediaTime() - animationStartTime
+        let progress = min(max(elapsed / animationDuration, 0), 1)
+        if progress >= 1 {
+            separatorItem.length = animationTargetLength
+            animationTimer?.invalidate()
+            animationTimer = nil
+            return
+        }
+        // easeInOutQuad: 慣性のある自然な動きで、メニューバー再レイアウト負荷も中央でピーク。
+        let eased: Double = progress < 0.5
+            ? 2 * progress * progress
+            : 1 - pow(-2 * progress + 2, 2) / 2
+        separatorItem.length = animationStartLength + (animationTargetLength - animationStartLength) * CGFloat(eased)
     }
 
     private func setupPopover() {
@@ -271,7 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
 
     @objc private func toggleFold(_ sender: Any?) {
         if isFolded {
-            separatorItem.length = Self.expandedSeparatorLength
+            animateSeparatorLength(to: Self.expandedSeparatorLength)
             return
         }
         guard isSeparatorOnLeftOfMain else { return }
@@ -339,8 +394,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
     }
 
     private func commitFold() {
-        separatorItem.length = Self.collapsedSeparatorLength
-        NSLog("[Kura] commitFold sepLen=%.0f lastScanResult=%d", separatorItem.length, lastScanResult.count)
+        let target = Self.collapsedSeparatorLength
+        animateSeparatorLength(to: target)
+        NSLog("[Kura] commitFold target=%.0f lastScanResult=%d", target, lastScanResult.count)
     }
 
     @objc private func quit(_ sender: Any?) {

@@ -112,6 +112,45 @@ Sources/Kura/
 
 これにより「擬似的に非表示」と「蔵に入っている」が**構造的に一致**する。RegistrationStore（明示的な登録設定）は v0.4 で廃止。
 
+### 開閉アニメーション（v0.5 で実装）
+
+セパレータ length 切替時に **180ms easeInOutQuad** の補間アニメーションを噛ませて、瞬間的なメニューバー再レイアウトを避ける。
+
+#### 実装手段
+
+- `NSStatusItem` は `NSAnimatablePropertyContainer` 非準拠のため、`animator()` プロキシは使えない
+- `Timer.scheduledTimer` 相当（`Timer(timeInterval:target:selector:userInfo:repeats:)` + `RunLoop.main.add(_:forMode:.common)`）で 60fps の手動補間
+- `.common` mode に追加することで、右クリックメニュー表示中などの tracking mode でもアニメ継続
+- `selector` 版にすることで `@MainActor` 隔離 `@objc tickAnimation()` を直接呼べる（Swift 6 strict-concurrency でクロージャ版より素直）
+
+#### 状態管理
+
+- `animationTimer: Timer?` で進行中アニメを保持。新規アニメ開始時に `invalidate()` して差し替え可能（向きが変わるトグル連打にも追随）
+- `animationStartTime` (CACurrentMediaTime ベース) / `animationStartLength` / `animationTargetLength` / `animationDuration` で補間状態を保持
+- アニメ完了時は `animationTargetLength` に明示スナップして丸め誤差を排除
+
+#### 画面構成変更との衝突回避
+
+`handleScreenParametersChanged()` はアニメ中だと next-frame で上書きされてしまうため、以下のロジックで分岐:
+
+- アニメ中で **target が折りたたみ方向** (`> expandedSeparatorLength`): `animationTargetLength` のみ更新（アニメは継続、新しい collapsed 値に向かう）
+- アニメ中で **target が展開方向** (`== expandedSeparatorLength`): 何もしない（展開しようとしていたら勝手に折りたたみに転じるのを防ぐ）
+- アニメ中でない、folded: 従来通り即時更新
+
+#### `isFolded` のセマンティクス
+
+`isFolded` は `length > expandedSeparatorLength` で判定する length ベース。アニメ中の中間値（例: 100）でも `true` を返すが、各呼び出し元のロジックと衝突しない:
+
+- `toggleFold` / `expandIfFolded`: アニメ中に再トグルされても向きが反転するだけで意図と一致
+- `startScan` / `togglePopover`: アニメ中は `!isFolded` guard で scan を skip するが、アニメ完了後の次回 popover で正常 scan される
+
+#### 適用範囲
+
+- `commitFold()`: collapsed への切替
+- `toggleFold(_:)` の展開分岐: expanded への切替
+- `expandIfFolded()` (FoldController): expanded への切替
+- `handleScreenParametersChanged()` の即時更新分岐: アニメ不要（screen 変化は連続発火しないし、視覚的にうるさい）
+
 ### スキャンタイミング
 
 scan は **AppDelegate が単一データソースとして管理**（`lastScanResult`）:
@@ -181,7 +220,7 @@ Carbon `RegisterEventHotKey` は deprecated ではなく、macOS 14 でも安定
 ## ロードマップ
 
 - **v0.4** (完了): セパレータ方式の折りたたみ実装（2 NSStatusItem）+ 右クリックメニューに「折りたたむ／展開する」追加 + 位置ベース対象スキャナ + 3 階層メニュー走査と単項目チェーン collapse + RegistrationStore 廃止
-- **v0.5**（進行中）: グローバルホットキー（⌃⌥⌘K、Carbon `RegisterEventHotKey`）。開閉アニメーション、ノッチ裏アイコンの自動検出表示は次フェーズ
+- **v0.5**（進行中）: グローバルホットキー（⌃⌥⌘K、Carbon `RegisterEventHotKey`） + 開閉アニメーション（180ms easeInOutQuad、Timer 駆動）。ノッチ裏アイコンの自動検出表示は次フェーズ
 
 ## 未来の検討事項
 
