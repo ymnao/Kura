@@ -9,7 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
     private var separatorItem: NSStatusItem!
     private var popover: NSPopover!
     /// グローバルホットキー（⌃⌥⌘K で折りたたみ／展開トグル）。
-    /// 解放時に deinit が登録解除する。
+    /// アプリ寿命と同じライフタイムで保持し、プロセス終了時に OS が Carbon ホットキーを自動解除する。
     private var hotKeyManager: HotKeyManager?
 
     /// 蔵対象アプリの単一データソース。AppDelegate がスキャンの責任を持ち、

@@ -22,8 +22,10 @@ import Carbon.HIToolbox
 @MainActor
 final class HotKeyManager {
     /// 同プロセス内に別の Carbon ホットキー利用者がいた場合の誤発火防止用シグネチャ。
-    private static let signature: OSType = 0x4B555241 // 'KURA'
-    private static let hotKeyID: UInt32 = 1
+    /// `nonisolated` にするのは Swift 6 で nonisolated callback (`dispatchHotKeyEvent`) から
+    /// 参照するため。`let` だが `@MainActor` class 内のプロパティはデフォルトで MainActor 隔離されるので明示する。
+    nonisolated private static let signature: OSType = 0x4B555241 // 'KURA'
+    nonisolated private static let hotKeyID: UInt32 = 1
 
     private static var handler: (@MainActor () -> Void)?
     private static var sharedHandlerRef: EventHandlerRef?
@@ -57,8 +59,7 @@ final class HotKeyManager {
                                  eventKind: UInt32(kEventHotKeyPressed))
         let status = InstallEventHandler(GetApplicationEventTarget(),
             { _, eventRef, _ in
-                HotKeyManager.dispatchHotKeyEvent(eventRef)
-                return noErr
+                return HotKeyManager.dispatchHotKeyEvent(eventRef)
             },
             1, &spec, nil, &sharedHandlerRef)
         if status != noErr {
@@ -71,8 +72,11 @@ final class HotKeyManager {
     /// Carbon callback は MainActor 外で呼ばれる可能性があるため nonisolated。
     /// 同プロセス内に別の `RegisterEventHotKey` 利用者がいても Kura のトグルが
     /// 誤発火しないよう、signature と id で照合してから dispatch する。
-    nonisolated static func dispatchHotKeyEvent(_ eventRef: EventRef?) {
-        guard let eventRef = eventRef else { return }
+    /// 戻り値: Kura のホットキーとして処理した場合は `noErr`、それ以外（ID 不一致 or
+    /// パラメータ取得失敗）は `eventNotHandledErr` を返して、Carbon が後続ハンドラに
+    /// イベントを伝播できるようにする。
+    nonisolated static func dispatchHotKeyEvent(_ eventRef: EventRef?) -> OSStatus {
+        guard let eventRef = eventRef else { return OSStatus(eventNotHandledErr) }
         var eventID = EventHotKeyID()
         let status = GetEventParameter(eventRef,
                                        EventParamName(kEventParamDirectObject),
@@ -83,11 +87,12 @@ final class HotKeyManager {
                                        &eventID)
         guard status == noErr,
               eventID.signature == signature,
-              eventID.id == hotKeyID else { return }
+              eventID.id == hotKeyID else { return OSStatus(eventNotHandledErr) }
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
                 HotKeyManager.handler?()
             }
         }
+        return noErr
     }
 }
