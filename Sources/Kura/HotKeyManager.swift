@@ -14,55 +14,50 @@ import Carbon.HIToolbox
 ///
 /// 単一ホットキー前提の設計（Kura は ⌃⌥⌘K のみ使用）。複数ホットキーが必要になった時点で
 /// registry/ID 払い出しを足すのは trivial なので、現状は最小構成にしておく。
+///
+/// ライフサイクル: HotKeyManager は AppDelegate のライフタイム = アプリ寿命と同じ。
+/// プロセス終了時に OS が Carbon ホットキーを自動解除するため、明示的な
+/// `UnregisterEventHotKey` は行わない。Swift 6 では `@MainActor` class の nonisolated
+/// deinit から non-Sendable な `EventHotKeyRef` に触れないので、deinit 自体を持たない設計。
 @MainActor
 final class HotKeyManager {
+    /// 同プロセス内に別の Carbon ホットキー利用者がいた場合の誤発火防止用シグネチャ。
+    private static let signature: OSType = 0x4B555241 // 'KURA'
+    private static let hotKeyID: UInt32 = 1
+
     private static var handler: (@MainActor () -> Void)?
     private static var sharedHandlerRef: EventHandlerRef?
-
-    private var hotKeyRef: EventHotKeyRef?
 
     /// ホットキーを登録。`keyCode` は Carbon の VK 定数（例: `kVK_ANSI_K`）、
     /// `modifiers` は `cmdKey | optionKey | controlKey` 等の bitwise OR。
     /// EventHandler 登録 or HotKey 登録のどちらかが失敗した場合は NSLog 警告を残して何もしない。
     init(keyCode: UInt32, modifiers: UInt32, handler: @escaping @MainActor () -> Void) {
-        // EventHandler が無い状態で RegisterEventHotKey を呼ぶと、キーは OS に予約された
-        // まま誰にも処理されない「死んだホットキー」になる（他アプリにも届かなくなる）。
-        // ハンドラ登録に失敗した時点で諦める。
+        // EventHandler が無い状態で RegisterEventHotKey を呼ぶと、キーは OS に予約される
+        // ものの自プロセスでは処理されない状態になる（Carbon は非排他登録なので他アプリには
+        // 引き続き届くが、Kura 自身が反応しないのは無意味）。ハンドラ登録に失敗した時点で諦める。
         guard Self.installSharedHandlerIfNeeded() else { return }
 
-        let signature: OSType = 0x4B555241 // 'KURA'
-        let eventID = EventHotKeyID(signature: signature, id: 1)
+        let eventID = EventHotKeyID(signature: Self.signature, id: Self.hotKeyID)
         var ref: EventHotKeyRef?
         let status = RegisterEventHotKey(keyCode, modifiers, eventID,
                                          GetApplicationEventTarget(), 0, &ref)
-        guard status == noErr, let ref = ref else {
+        guard status == noErr, ref != nil else {
             NSLog("[Kura] HotKey register failed status=\(status) keyCode=\(keyCode) modifiers=\(modifiers)")
             return
         }
-        self.hotKeyRef = ref
         Self.handler = handler
         NSLog("[Kura] HotKey registered keyCode=\(keyCode) modifiers=\(modifiers)")
     }
 
-    deinit {
-        let ref = hotKeyRef
-        Task { @MainActor in
-            if let ref = ref {
-                UnregisterEventHotKey(ref)
-            }
-            HotKeyManager.handler = nil
-        }
-    }
-
-    /// 共有ハンドラの登録を一度だけ試す。既に登録済みなら true、今回成功しても true、
+    /// 共有ハンドラの登録を一度だけ試す。既に登録済み or 今回成功なら true、
     /// 失敗時のみ false を返す。呼び出し側はこの戻り値で「RegisterEventHotKey に進んで良いか」を判断する。
     private static func installSharedHandlerIfNeeded() -> Bool {
         if sharedHandlerRef != nil { return true }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                  eventKind: UInt32(kEventHotKeyPressed))
         let status = InstallEventHandler(GetApplicationEventTarget(),
-            { _, _, _ in
-                HotKeyManager.dispatchHotKeyEvent()
+            { _, eventRef, _ in
+                HotKeyManager.dispatchHotKeyEvent(eventRef)
                 return noErr
             },
             1, &spec, nil, &sharedHandlerRef)
@@ -73,9 +68,22 @@ final class HotKeyManager {
         return true
     }
 
-    /// Carbon callback は MainActor 外で呼ばれる可能性があるため nonisolated にして、
-    /// DispatchQueue.main.async で MainActor に戻してからハンドラを呼ぶ。
-    nonisolated static func dispatchHotKeyEvent() {
+    /// Carbon callback は MainActor 外で呼ばれる可能性があるため nonisolated。
+    /// 同プロセス内に別の `RegisterEventHotKey` 利用者がいても Kura のトグルが
+    /// 誤発火しないよう、signature と id で照合してから dispatch する。
+    nonisolated static func dispatchHotKeyEvent(_ eventRef: EventRef?) {
+        guard let eventRef = eventRef else { return }
+        var eventID = EventHotKeyID()
+        let status = GetEventParameter(eventRef,
+                                       EventParamName(kEventParamDirectObject),
+                                       EventParamType(typeEventHotKeyID),
+                                       nil,
+                                       MemoryLayout<EventHotKeyID>.size,
+                                       nil,
+                                       &eventID)
+        guard status == noErr,
+              eventID.signature == signature,
+              eventID.id == hotKeyID else { return }
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
                 HotKeyManager.handler?()

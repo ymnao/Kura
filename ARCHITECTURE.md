@@ -150,10 +150,11 @@ Carbon `RegisterEventHotKey` は deprecated ではなく、macOS 14 でも安定
 
 ### `HotKeyManager` の役割
 
-- `init(keyCode:modifiers:handler:)` でホットキーを登録、`deinit` で `UnregisterEventHotKey` 解除
+- `init(keyCode:modifiers:handler:)` でホットキーを登録。アプリ寿命と同じライフタイムなので `UnregisterEventHotKey` は呼ばず、プロセス終了時に OS が自動解除する設計（Swift 6 では `@MainActor` class の nonisolated deinit から non-Sendable な `EventHotKeyRef` を触れないため、deinit 自体を持たない）
 - 単一ホットキー前提（Kura は ⌃⌥⌘K のみ使用）。複数ホットキーが必要になった時点で registry / ID 払い出しを足すのは trivial なので、現状は最小構成にしている
-- Carbon C callback は MainActor 隔離外で発火するため、`nonisolated static func dispatchHotKeyEvent` で受け、`DispatchQueue.main.async` + `MainActor.assumeIsolated` で MainActor に戻してから登録済みクロージャを呼ぶ
+- Carbon C callback は MainActor 隔離外で発火するため、`nonisolated static func dispatchHotKeyEvent(_:)` で受け、`DispatchQueue.main.async` + `MainActor.assumeIsolated` で MainActor に戻してから登録済みクロージャを呼ぶ
 - 保存する handler 型は `@MainActor () -> Void` を明示し、MainActor 隔離下でしか呼べないことを型レベルで強制
+- `EventHotKeyID` の `signature='KURA'` + `id=1` で「Kura が登録したホットキー」だけを照合する。Carbon `RegisterEventHotKey` は非排他登録（同じキーを複数アプリが登録でき、各アプリに通知される）なので、誤発火防止のための識別子チェックは callback 側に必要
 
 ### ホットキーから `toggleFold(_:)` を呼ぶ設計
 
