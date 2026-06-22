@@ -48,13 +48,14 @@
 ```
 Sources/Kura/
 ├── KuraApp.swift                 エントリポイント（@main struct, @MainActor 隔離）
-├── AppDelegate.swift             NSStatusItem (本体 + セパレータ) / NSPopover の組み立て、折りたたみ、scan キャッシュ
+├── AppDelegate.swift             NSStatusItem (本体 + セパレータ) / NSPopover の組み立て、折りたたみ、scan キャッシュ、ホットキー登録
 ├── KuraViewController.swift      ポップオーバーの NSOutlineView UI（表示専用）
 ├── MenuBarLayoutScanner.swift    全アプリの NSStatusItem 座標から蔵対象を列挙（StatusBarApp / ScanLayoutResult）
 ├── MenuBarScanner.swift          AXMenuBarItem 配下のメニューを 3 階層走査、単項目チェーン collapse
 ├── MenuBarDispatcher.swift       AXPress で項目を発火
 ├── MenuBarItem.swift             ScanResult / MenuBarItem 値型（children, isMenuItem を持つ階層構造）
 ├── AXHelpers.swift               AX (Accessibility) API の共有ラッパ
+├── HotKeyManager.swift           Carbon RegisterEventHotKey でグローバルホットキーを登録
 └── AccessibilityPermission.swift AX 権限の確認・要求・設定起動
 ```
 
@@ -133,6 +134,33 @@ scan は **AppDelegate が単一データソースとして管理**（`lastScanR
 
 AX 呼び出しは `messagingTimeout = 1.0` 秒で同期だが、`Task.detached` で実行するためメインスレッドはブロックされない。
 
+## グローバルホットキー（v0.5 で実装）
+
+折りたたみ／展開のトグルを **⌃⌥⌘K** （Ctrl+Option+Cmd+K）で発火できる。
+
+### 実装手段の選定
+
+| 手段 | 必要権限 | 採用 |
+|---|---|---|
+| Carbon `RegisterEventHotKey` | 不要 | ◯ |
+| `NSEvent.addGlobalMonitorForEvents` | アクセシビリティ | × |
+| `CGEventTap` | アクセシビリティ + 入力監視 | × |
+
+Carbon `RegisterEventHotKey` は deprecated ではなく、macOS 14 でも安定動作する。権限プロンプトが増えないのが大きな利点。
+
+### `HotKeyManager` の役割
+
+- `init(keyCode:modifiers:handler:)` で 1 ホットキーを登録、`deinit` で `UnregisterEventHotKey` 解除
+- `InstallEventHandler` は共有（`sharedHandlerRef`）で 1 度だけ走らせ、同じ Carbon イベントハンドラ経由で複数 HotKey ID を識別
+- Carbon C callback は MainActor 隔離外で発火するため、`nonisolated static func dispatchHotKeyEvent` で受け、`DispatchQueue.main.async` + `MainActor.assumeIsolated` で MainActor に戻してから登録済みクロージャを呼ぶ
+- `registry: [UInt32: @MainActor () -> Void]` の closure 型は `@MainActor` を明示し、MainActor 隔離下でしか呼べないことを型レベルで強制
+
+### ホットキーから `toggleFold(_:)` を呼ぶ設計
+
+ホットキーハンドラは AppDelegate の既存 `toggleFold(_:)` をそのまま呼ぶ。scan 待ち・セパレータ位置チェック・alert 表示などの折りたたみコミット手順は右クリックメニュー経由と完全に同じ。
+
+セパレータが蔵の左にない場合は `toggleFold` が早期 `return` でサイレント無視する（右クリックメニューでは disabled + tooltip だが、ホットキーでは現状フィードバックなし）。実用上は初回セットアップ時のみのケースなので許容。
+
 ## 制約と妥協
 
 - **他アプリのメニューバーアイコン画像は使えない** — Dock/Finder のアプリアイコンで代用
@@ -152,7 +180,7 @@ AX 呼び出しは `messagingTimeout = 1.0` 秒で同期だが、`Task.detached`
 ## ロードマップ
 
 - **v0.4** (完了): セパレータ方式の折りたたみ実装（2 NSStatusItem）+ 右クリックメニューに「折りたたむ／展開する」追加 + 位置ベース対象スキャナ + 3 階層メニュー走査と単項目チェーン collapse + RegistrationStore 廃止
-- **v0.5**: ホットキー対応（Carbon `RegisterEventHotKey`）、開閉アニメーション、ノッチ裏アイコンの自動検出表示
+- **v0.5**（進行中）: グローバルホットキー（⌃⌥⌘K、Carbon `RegisterEventHotKey`）。開閉アニメーション、ノッチ裏アイコンの自動検出表示は次フェーズ
 
 ## 未来の検討事項
 

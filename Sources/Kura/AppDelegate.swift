@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
@@ -7,6 +8,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
     /// セパレータ（折りたたみ時に length 膨張、蔵の左に置かれる前提）
     private var separatorItem: NSStatusItem!
     private var popover: NSPopover!
+    /// グローバルホットキー（⌃⌥⌘K で折りたたみ／展開トグル）。
+    /// 解放時に deinit が登録解除する。
+    private var hotKeyManager: HotKeyManager?
 
     /// 蔵対象アプリの単一データソース。AppDelegate がスキャンの責任を持ち、
     /// 折りたたみ中も展開中も同じキャッシュを表示することで一貫性を保つ。
@@ -50,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
         setupStatusItem()
         setupSeparatorItem()
         setupPopover()
+        setupHotKey()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleScreenParametersChanged),
@@ -126,6 +131,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
         }
         vc.foldController = self
         popover.contentViewController = vc
+    }
+
+    /// ⌃⌥⌘K で折りたたみ／展開トグル。`toggleFold(_:)` の既存ロジック（scan 待ち・
+    /// セパレータ位置チェック・alert 表示）をそのまま流用する。
+    /// 衝突しにくく覚えやすい組み合わせとして ⌃⌥⌘K を採用（macOS 標準 / 主要 IDE に既定なし）。
+    private func setupHotKey() {
+        let modifiers = UInt32(controlKey | optionKey | cmdKey)
+        hotKeyManager = HotKeyManager(
+            keyCode: UInt32(kVK_ANSI_K),
+            modifiers: modifiers
+        ) { [weak self] in
+            self?.toggleFold(nil)
+        }
     }
 
     /// 非同期 scan。折りたたみ中は AX position が画面外で意味がないのでスキップ。
