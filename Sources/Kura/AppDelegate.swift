@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
@@ -7,6 +8,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
     /// セパレータ（折りたたみ時に length 膨張、蔵の左に置かれる前提）
     private var separatorItem: NSStatusItem!
     private var popover: NSPopover!
+    /// グローバルホットキー（⌃⌥⌘K で折りたたみ／展開トグル）。
+    /// アプリ寿命と同じライフタイムで保持し、プロセス終了時に OS が Carbon ホットキーを自動解除する。
+    private var hotKeyManager: HotKeyManager?
 
     /// 蔵対象アプリの単一データソース。AppDelegate がスキャンの責任を持ち、
     /// 折りたたみ中も展開中も同じキャッシュを表示することで一貫性を保つ。
@@ -50,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
         setupStatusItem()
         setupSeparatorItem()
         setupPopover()
+        setupHotKey()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleScreenParametersChanged),
@@ -126,6 +131,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
         }
         vc.foldController = self
         popover.contentViewController = vc
+    }
+
+    /// ⌃⌥⌘K で折りたたみ／展開トグル（詳細は ARCHITECTURE.md）。
+    private func setupHotKey() {
+        hotKeyManager = HotKeyManager(
+            keyCode: UInt32(kVK_ANSI_K),
+            modifiers: UInt32(controlKey | optionKey | cmdKey)
+        ) { [weak self] in
+            self?.toggleFold(nil)
+        }
     }
 
     /// 非同期 scan。折りたたみ中は AX position が画面外で意味がないのでスキップ。
