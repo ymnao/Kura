@@ -109,6 +109,7 @@ Sources/Kura/
 - `needsExpandToFire` の項目は UI に **「（折りたたみ非対応）」と表示** し、折りたたみ中はクリックを無効化する。展開時は通常通り AXPress で動作（メニュー UI がアイコン位置 = 画面内に開く）。「隠す」目的を保つため自動展開はしない — ユーザーが必要に応じて手動で「展開する」を選ぶフロー
 - `MenuBarItem.statusItemElement` には親 AXMenuBarItem を保存しておき、`MenuBarDispatcher` が AXPress 時にこれを優先使用する。これにより展開時のクリックでアプリの本物 NSMenu が確実にアイコン位置に開く（個別 AXMenuItem への AXPress が失敗するアプリでも動作する）
 - root レベルが単項目チェーン（例: アプリ直下に AXMenuBarItem 1 個だけ）の場合は短絡して、実質的なメニュー項目を AppNode 直下に昇格表示する
+- **ノッチ裏アイコンへの操作**: M MacBook 系でノッチに隠れて視認できないアイコンも、`kAXPositionAttribute` は座標を返す（`(0,0)` でない、screen.frame 内、蔵より左の条件を満たす）ため、位置ベース設計の副産物として自動的に蔵対象に含まれる。視認できなくても popover からメニュー操作可能 — 「ノッチ裏アイコン操作」専用機能を別途実装する必要はない
 
 これにより「擬似的に非表示」と「蔵に入っている」が**構造的に一致**する。RegistrationStore（明示的な登録設定）は v0.4 で廃止。
 
@@ -181,7 +182,9 @@ Carbon `RegisterEventHotKey` は deprecated ではなく、macOS 14 でも安定
 ## ロードマップ
 
 - **v0.4** (完了): セパレータ方式の折りたたみ実装（2 NSStatusItem）+ 右クリックメニューに「折りたたむ／展開する」追加 + 位置ベース対象スキャナ + 3 階層メニュー走査と単項目チェーン collapse + RegistrationStore 廃止
-- **v0.5**（進行中）: グローバルホットキー（⌃⌥⌘K、Carbon `RegisterEventHotKey`）。開閉アニメーション、ノッチ裏アイコンの自動検出表示は次フェーズ
+- **v0.5** (完了): グローバルホットキー（⌃⌥⌘K、Carbon `RegisterEventHotKey`）
+  - 開閉アニメーション: `length` 補間方式を試したが、毎フレームのメニューバー再レイアウトコストで体感が重く廃止（[#6](https://github.com/ymnao/Kura/pull/6) close 済み）
+  - ノッチ裏アイコン操作: v0.4 の位置ベース設計の副産物として実現済み（上記「対象アプリの選定」参照）
 
 ## 未来の検討事項
 
