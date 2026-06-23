@@ -129,6 +129,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
         vc.onItemActivated = { [weak self] in
             self?.popover.performClose(nil)
         }
+        vc.onReorder = { [weak self] orderedBundleIds in
+            guard let self = self else { return }
+            // 現在 popover に見えていないアプリ（終了中 / 一時的に蔵対象外）の bundleId を失わないよう、
+            // 既存の保存順のうち「現在表示中の bundleId に含まれないもの」を末尾に追加して merge する。
+            // 不在アプリの絶対位置は保持されない（並び替えの度に末尾へ押し下げられる）が、bundleId は
+            // 記憶されるため、再蔵入り時に「未知」扱いではなくユーザー指定順の末尾に並ぶ。
+            let existing = AppOrderStore.load()
+            let visible = Set(orderedBundleIds)
+            let absent = existing.filter { !visible.contains($0) }
+            AppOrderStore.save(orderedBundleIds + absent)
+            // 次回 setTargets が古い順序を見せないよう、現在の cache も新順序で同期する。
+            // scan が並走していても applyScanResult 側で AppOrderStore.load() を読み直すので
+            // ここで保存と cache 更新を MainActor 上で原子的に済ませれば順序が逆戻りすることはない。
+            self.lastScanResult = AppOrderStore.applied(to: self.lastScanResult)
+        }
         vc.foldController = self
         popover.contentViewController = vc
     }
@@ -199,7 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
             let preservedFromCache = lastScanResult.filter {
                 failedBundleIds.contains($0.bundleIdentifier) && !successBundles.contains($0.bundleIdentifier)
             }
-            lastScanResult = (apps + preservedFromCache).sorted { $0.leftmostX < $1.leftmostX }
+            lastScanResult = AppOrderStore.applied(to: apps + preservedFromCache)
             // 一時失敗が残っている間は warmup を停止しない（起動直後の AX 不安定状態で
             // キャッシュ未確立のまま打ち切るのを防ぐ）。
             if failedBundleIds.isEmpty {

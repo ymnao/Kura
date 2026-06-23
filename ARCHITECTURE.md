@@ -56,6 +56,7 @@ Sources/Kura/
 ├── MenuBarItem.swift             ScanResult / MenuBarItem 値型（children, isMenuItem を持つ階層構造）
 ├── AXHelpers.swift               AX (Accessibility) API の共有ラッパ
 ├── HotKeyManager.swift           Carbon RegisterEventHotKey でグローバルホットキーを登録
+├── AppOrderStore.swift           popover 内の並び順を UserDefaults に永続化（bundleIdentifier 配列）
 └── AccessibilityPermission.swift AX 権限の確認・要求・設定起動
 ```
 
@@ -163,6 +164,48 @@ Carbon `RegisterEventHotKey` は deprecated ではなく、macOS 14 でも安定
 
 セパレータが蔵の左にない場合は `toggleFold` が早期 `return` でサイレント無視する（右クリックメニューでは disabled + tooltip だが、ホットキーでは現状フィードバックなし）。実用上は初回セットアップ時のみのケースなので許容。
 
+## 並び替え永続化（v0.6 で実装）
+
+popover 内に表示される蔵対象アプリの **並び順を D&D で並び替え、UserDefaults に永続化** する。menubar 上の物理位置はそのまま（他アプリの NSStatusItem は移動できないため）、popover 上の表示順だけをユーザー指定順に固定する。
+
+### 永続化形式
+
+`UserDefaults` キー `"kura.appOrder"` に **`[bundleIdentifier]`** (String 配列) を保存。`AppOrderStore.load()` / `.save(_:)` の薄いラッパだけ持ち、シングルトン化やキャッシュは無し。
+
+保存時は **既存の保存順と merge** する: `AppDelegate.onReorder` ハンドラが「現在 popover に見えている bundleId（= 並び替えた新順序）」+「既存保存順のうち今見えていない bundleId（= 終了中 / 一時的に蔵対象外）」を連結して `save`。不在アプリの絶対位置は保持されない（並び替えの度に末尾へ押し下げられる）が、bundleId は記憶されるため、再蔵入り時に「未知」扱いではなくユーザー指定順の末尾に並ぶ。例: 保存順 `[A, B, C]` で表示中 `[A, C]` を `[C, A]` に並び替えると、保存順は `[C, A, B]` になる（B は末尾に押し下げ）。
+
+`AppOrderStore.applied(to:)` の `indexMap` 構築は手動編集や将来の保存経路追加で重複 bundleId が入っても trap せず先勝ちで採用する。
+
+### D&D の実装
+
+`KuraViewController` の `NSOutlineView` に `NSOutlineViewDataSource` のドラッグ系メソッドを実装:
+
+- `pasteboardWriterForItem`: **AppNode 行のみ** ドラッグ可。`NSPasteboardItem` に bundleId を string で乗せる（ローカルペーストボード型 `"kura.appRow"`）
+- `validateDrop`: root レベル（`item == nil`）の「行間」（`index >= 0`）を許可、`.move` を返す。AppNode 行への「上」へのドロップ（`index == NSOutlineViewDropOnItemIndex`）は `setDropItem(nil, dropChildIndex: row)` で **その行の前の root gap に再解釈** する（AppNode は `isItemExpandable=true` のため AppKit が「子として追加」と解釈してくるが、子はメニュー項目で並び替え対象ではないため書き換える）。AppNode 以外の子（メニュー項目位置）は弾く
+- `acceptDrop`: pasteboard から bundleId を取り出し、`appNodes` 配列内で参照を引き直して再構築 → `reloadData` → `onReorder` コールバック発火
+- `outlineView.draggingDestinationFeedbackStyle = .regular`（デフォルト）。`.gap` は AppNode が `isItemExpandable=true` の場合に行間 index 計算が不安定（常に 0 になる）症状があったため使わない。`.regular` だと AppNode 上に行ハイライトが出るが、上記の `setDropItem` 再解釈で並び替えとして機能する
+- `NSOutlineView` のドラッグソース側の operation mask はデフォルトで `.move` を含まないため、`ReorderableOutlineView` という小さなサブクラスで `draggingSession(_:sourceOperationMaskFor:)` を `.move` にオーバーライド（これがないと `validateDrop` で `.move` を返してもドロップが成立しない）
+
+### 復元と適用
+
+`AppOrderStore.applied(to:)` が scan 結果のソート時に保存順を適用:
+
+- 保存順に登場する bundleId は順序通り前方
+- 未登録の bundleId は末尾に `leftmostX` 順（新規アプリは物理位置で末尾追加）
+- 保存順が空（初回起動や永続化前）の場合は従来通り `leftmostX` 順
+
+`applyScanResult` 内の `(apps + preservedFromCache).sorted { $0.leftmostX < $1.leftmostX }` を `AppOrderStore.applied(to:)` に置換。保存形式と「未知 bundleId は末尾」の適用ロジックを 1 ファイル（`AppOrderStore`）に集約することで、形式変更時の同期コストを排除する。
+
+### 並走 scan との競合回避
+
+D&D 完了 → 並走 scan 完了の順で起きる場合の対策:
+
+1. ユーザーが D&D → `acceptDrop` で `appNodes` 配列再構築 → `onReorder?(新bundleIds)` を **同期で呼び出し**
+2. `AppDelegate.onReorder` ハンドラが MainActor 上で「既存保存順との merge → `AppOrderStore.save` → `self.lastScanResult = AppOrderStore.applied(to: self.lastScanResult)`」を一気に実行
+3. 並走 scan が完了 → `applyScanResult` で `AppOrderStore.applied(to:)` が内部で `load()` を読む → 新順序を適用 → `setTargets` で VC が新順序で reload
+
+MainActor 上で原子的に save と cache 更新が走るため、次回 `setTargets` が古い順序を見せることはない。
+
 ## 制約と妥協
 
 - **他アプリのメニューバーアイコン画像は使えない** — Dock/Finder のアプリアイコンで代用
@@ -185,6 +228,7 @@ Carbon `RegisterEventHotKey` は deprecated ではなく、macOS 14 でも安定
 - **v0.5** (完了): グローバルホットキー（⌃⌥⌘K、Carbon `RegisterEventHotKey`）
   - 開閉アニメーション: `length` 補間方式を試したが、毎フレームのメニューバー再レイアウトコストで体感が重く廃止（[#6](https://github.com/ymnao/Kura/pull/6) close 済み）
   - ノッチ裏アイコン操作: v0.4 の位置ベース設計の副産物として実現済み（上記「対象アプリの選定」参照）
+- **v0.6** (進行中): 蔵対象アプリの並び替え永続化（popover で D&D、`UserDefaults "kura.appOrder"` に bundleId 配列を保存）+ シンプルな UI/UX 改善（順次）
 
 ## 未来の検討事項
 
