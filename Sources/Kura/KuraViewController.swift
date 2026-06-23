@@ -8,10 +8,6 @@ protocol FoldController: AnyObject {
     func expandIfFolded()
 }
 
-fileprivate final class StatusRow {
-    var text: String = "読込中…"
-}
-
 /// MainActor 上でのみ生成・更新される。scan の Task.detached には AppNode 自体を渡さず、
 /// 値型の StatusBarApp と generation だけを渡し、完了時に bundleId で再 lookup する設計。
 /// 自身が解放される時に scanTask を自動キャンセルすることで、KuraViewController.deinit から
@@ -21,7 +17,6 @@ final class AppNode {
     var result: ScanResult?
     var scanTask: Task<Void, Never>?
     var scanGeneration: Int = 0
-    fileprivate let statusRow = StatusRow()
 
     init(_ app: StatusBarApp) {
         self.app = app
@@ -32,22 +27,20 @@ final class AppNode {
     }
 }
 
-/// NSOutlineView のドラッグソース側の operation mask を `.move` に明示する。
-/// デフォルトは context によって `.copy` 等に制限され、`validateDrop` で `.move` を返しても
-/// ソース側に許可がないとドロップが成立しない（OS 側で operation 0 になり accept が呼ばれない）。
-/// `.withinApplication` / `.outsideApplication` 両方で `.move` を許可する。
-private final class ReorderableOutlineView: NSOutlineView {
-    override func draggingSession(
-        _ session: NSDraggingSession,
-        sourceOperationMaskFor context: NSDraggingContext
-    ) -> NSDragOperation {
-        return .move
-    }
+@MainActor
+protocol IconViewDelegate: AnyObject {
+    func iconViewClicked(_ view: IconView)
+}
+
+@MainActor
+protocol IconGridReorderDelegate: AnyObject {
+    func iconGrid(_ view: IconGridView, didReorderTo newBundleIds: [String])
 }
 
 @MainActor
 final class KuraViewController: NSViewController {
-    private let outlineView = ReorderableOutlineView()
+    private let gridView = IconGridView()
+    private let scrollView = NSScrollView()
     private let emptyLabel = NSTextField(labelWithString: "")
     private let bannerContainer = NSView()
     private let bannerLabel = NSTextField(labelWithString: "⚠ アクセシビリティ未許可")
@@ -59,20 +52,36 @@ final class KuraViewController: NSViewController {
 
     var onItemActivated: (() -> Void)?
     /// AppNode の並び替え完了時に呼ばれる。引数は新しい順序の bundleIdentifier 配列。
-    /// AppDelegate が AppOrderStore に保存する責務を持つ。
     var onReorder: (([String]) -> Void)?
     weak var foldController: FoldController?
 
-    private static let appCellId = NSUserInterfaceItemIdentifier("kura.appRow")
-    private static let itemCellId = NSUserInterfaceItemIdentifier("kura.itemRow")
-    /// AppNode 行ドラッグ用のローカルペーストボード型。bundleIdentifier を string で乗せる。
-    private static let dragType = NSPasteboard.PasteboardType("kura.appRow")
+    /// IconView 間で共有する drag pasteboard 型。bundleIdentifier を string で乗せる。
+    static let dragType = NSPasteboard.PasteboardType("kura.appRow")
+
+    static let cellSize = NSSize(width: 44, height: 44)
+    static let iconSize: CGFloat = 32
+    static let columns = 4
+    static let gridGap: CGFloat = 8
+    static let gridPadding: CGFloat = 4
+    static let contentHorizontalPadding: CGFloat = 12
+
+    /// popover の幅を決める固定値。`AppDelegate` 側の `popover.contentSize` と整合させる。
+    static var preferredPopoverWidth: CGFloat {
+        let grid = CGFloat(columns) * cellSize.width
+            + CGFloat(columns - 1) * gridGap
+            + gridPadding * 2
+        return grid + contentHorizontalPadding * 2
+    }
 
     override func loadView() {
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 420))
+        let container = NSView(frame: NSRect(
+            x: 0, y: 0,
+            width: Self.preferredPopoverWidth,
+            height: 240
+        ))
 
         let title = NSTextField(labelWithString: "蔵")
-        title.font = NSFont.systemFont(ofSize: 22, weight: .bold)
+        title.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
         title.alignment = .center
         title.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(title)
@@ -81,26 +90,6 @@ final class KuraViewController: NSViewController {
         separator.boxType = .separator
         separator.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(separator)
-
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("kura.row"))
-        outlineView.headerView = nil
-        outlineView.rowHeight = 28
-        outlineView.gridStyleMask = []
-        outlineView.selectionHighlightStyle = .none
-        outlineView.backgroundColor = .clear
-        outlineView.indentationPerLevel = 14
-        outlineView.indentationMarkerFollowsCell = true
-        outlineView.intercellSpacing = NSSize(width: 0, height: 2)
-        outlineView.addTableColumn(column)
-        outlineView.outlineTableColumn = column
-        outlineView.dataSource = self
-        outlineView.delegate = self
-        outlineView.target = self
-        outlineView.action = #selector(outlineViewClicked(_:))
-        outlineView.registerForDraggedTypes([Self.dragType])
-        // `.gap` は AppNode が isItemExpandable=true の場合に行間 index 計算が
-        // 不安定（常に 0 になる）症状が出るため、デフォルトの `.regular` に任せる。
-        outlineView.draggingDestinationFeedbackStyle = .regular
 
         bannerContainer.wantsLayer = true
         bannerContainer.layer?.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.15).cgColor
@@ -126,16 +115,20 @@ final class KuraViewController: NSViewController {
         bannerHeightConstraint = bannerContainer.heightAnchor.constraint(equalToConstant: 0)
         bannerHeightConstraint.isActive = true
 
-        let scrollView = NSScrollView()
+        gridView.translatesAutoresizingMaskIntoConstraints = false
+        gridView.reorderDelegate = self
+
         scrollView.hasVerticalScroller = true
+        scrollView.scrollerStyle = .overlay
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
-        scrollView.documentView = outlineView
+        scrollView.contentView.drawsBackground = false
+        scrollView.documentView = gridView
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(scrollView)
 
         emptyLabel.stringValue = "蔵の左にアイコンがありません\n\n隠したいメニューバーアイコンを\n蔵の左側にドラッグしてください"
-        emptyLabel.font = NSFont.systemFont(ofSize: 12)
+        emptyLabel.font = NSFont.systemFont(ofSize: 11)
         emptyLabel.textColor = .tertiaryLabelColor
         emptyLabel.alignment = .center
         emptyLabel.maximumNumberOfLines = 0
@@ -143,17 +136,17 @@ final class KuraViewController: NSViewController {
         container.addSubview(emptyLabel)
 
         NSLayoutConstraint.activate([
-            title.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+            title.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
             title.centerXAnchor.constraint(equalTo: container.centerXAnchor),
 
-            separator.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
-            separator.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            separator.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            separator.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
+            separator.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.contentHorizontalPadding),
+            separator.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Self.contentHorizontalPadding),
             separator.heightAnchor.constraint(equalToConstant: 1),
 
-            bannerContainer.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
-            bannerContainer.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            bannerContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            bannerContainer.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 6),
+            bannerContainer.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.contentHorizontalPadding),
+            bannerContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Self.contentHorizontalPadding),
 
             bannerLabel.leadingAnchor.constraint(equalTo: bannerContainer.leadingAnchor, constant: 10),
             bannerLabel.centerYAnchor.constraint(equalTo: bannerContainer.centerYAnchor),
@@ -162,15 +155,15 @@ final class KuraViewController: NSViewController {
             bannerButton.trailingAnchor.constraint(equalTo: bannerContainer.trailingAnchor, constant: -8),
             bannerButton.centerYAnchor.constraint(equalTo: bannerContainer.centerYAnchor),
 
-            scrollView.topAnchor.constraint(equalTo: bannerContainer.bottomAnchor, constant: 8),
-            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
+            scrollView.topAnchor.constraint(equalTo: bannerContainer.bottomAnchor, constant: 6),
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.contentHorizontalPadding),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Self.contentHorizontalPadding),
+            scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
 
             emptyLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            emptyLabel.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 20),
-            emptyLabel.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -20),
+            emptyLabel.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 16),
+            emptyLabel.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
         ])
 
         view = container
@@ -210,16 +203,13 @@ final class KuraViewController: NSViewController {
             let node: AppNode
             if let cached, cached.app == app {
                 node = cached
-                // 折りたたみ中は cache 保持。展開中だけ result をリセットして再 scan する。
                 if !folded {
                     node.scanTask?.cancel()
                     node.scanTask = nil
                     node.scanGeneration &+= 1
                     node.result = nil
-                    node.statusRow.text = "読込中…"
                 }
             } else {
-                // 別アプリに入れ替わった場合は cache 破棄して新規ノード
                 cached?.scanTask?.cancel()
                 node = AppNode(app)
             }
@@ -231,12 +221,16 @@ final class KuraViewController: NSViewController {
             node.scanTask?.cancel()
             nodeCache.removeValue(forKey: key)
         }
-        outlineView.reloadData()
+        let iconViews = appNodes.map { node -> IconView in
+            let v = IconView(app: node.app)
+            v.delegate = self
+            return v
+        }
+        gridView.setIcons(iconViews)
         emptyLabel.isHidden = !appNodes.isEmpty
         // 折りたたみ中はアプリのアイコンが画面外で AX children を取得できないアプリが
         // 存在する（メニューを開いた時にしか children を提供しないアプリ等）。
         // 折りたたみ前の今のうちに全 AppNode のメニュー詳細を scan して cache 化しておく。
-        // 折りたたみ中はキックしない（result も保持されているのでそのまま再利用）。
         if !folded {
             for node in appNodes {
                 scanIfNeeded(node)
@@ -252,46 +246,9 @@ final class KuraViewController: NSViewController {
         AccessibilityPermission.openSystemSettings()
     }
 
-    @objc private func outlineViewClicked(_ sender: Any?) {
-        let row = outlineView.clickedRow
-        guard row >= 0, let item = outlineView.item(atRow: row) as? MenuBarItem else { return }
-        let folded = foldController?.isFolded ?? false
-        // 子を持つ行（サブメニュー）は展開/折りたたみで開閉。葉のみ AXPress で発火する。
-        if !item.children.isEmpty {
-            if outlineView.isItemExpanded(item) {
-                outlineView.collapseItem(item)
-            } else {
-                outlineView.expandItem(item)
-            }
-            return
-        }
-        guard item.isExecutable else { return }
-        // 折りたたみ中 + cache 不完全（needsExpandToFire）は「折りたたみ非対応」として無効化。
-        // 自動展開すると「隠す」目的が崩れるため、ユーザーが手動で展開してから操作する流れに統一。
-        if folded && item.needsExpandToFire {
-            NSLog("[Kura] click: needsExpandToFire while folded → skip (unsupported)")
-            return
-        }
-        // 折りたたみ中 + AXMenuBarItem（NSStatusItem アイコン自体）クリックは AXPress でアイコンが
-        // 画面に戻ってしまうのでスキップ。
-        if folded && !item.isMenuItem {
-            NSLog("[Kura] click: folded+AXMenuBarItem → skip")
-            return
-        }
-        NSLog("[Kura] click: direct press")
-        onItemActivated?()
-        MenuBarDispatcher.press(item)
-    }
-
-    // VC が解放されると appNodes / nodeCache の AppNode も解放されるため、
-    // 各 AppNode.deinit が自身の scanTask をキャンセルしてくれる。deinit から
-    // nodeCache を触ると Swift 6 strict-concurrency でエラーになるため明示的な deinit は不要。
-
     private func scanIfNeeded(_ node: AppNode) {
         guard node.result == nil, node.scanTask == nil else { return }
         let generation = node.scanGeneration
-        // Task.detached には value 型 (StatusBarApp) と generation のみ渡す。
-        // AppNode 参照を持ち出さないので、MainActor からの隔離が型レベルで保たれる。
         let app = node.app
         node.scanTask = Task.detached(priority: .userInitiated) { [weak self] in
             let result = MenuBarScanner.scan(app)
@@ -299,240 +256,375 @@ final class KuraViewController: NSViewController {
         }
     }
 
-    /// 完了結果を反映する条件は「同じ bundleId のノードが現存」「ノードの app が値として一致」
-    /// 「generation も一致」の 3 点。PID 変更や対象 index 変更で新ノードに入れ替わった場合、
-    /// 新ノードは generation = 1 で始まるため、旧 Task (同じく generation = 1) の完了で
-    /// 新ノードを汚染するリスクがある。app を value 比較することでこれを防ぐ。
     private func handleScanCompletion(app: StatusBarApp, generation: Int, result: ScanResult) {
         guard let node = nodeCache[app.bundleIdentifier],
               node.app == app,
               node.scanGeneration == generation else { return }
         node.scanTask = nil
         node.result = result
-        node.statusRow.text = Self.statusText(for: result)
-        guard appNodes.contains(where: { $0 === node }) else { return }
-        outlineView.reloadItem(node, reloadChildren: true)
-    }
-
-    private static func statusText(for result: ScanResult) -> String {
-        switch result {
-        case .notRunning: return "起動していません"
-        case .failed(let reason): return "走査失敗: \(reason)"
-        case .items(let items) where items.isEmpty: return "メニュー項目なし"
-        case .items: return ""
-        }
-    }
-
-    private func dequeue<T: NSTableCellView>(_ id: NSUserInterfaceItemIdentifier) -> T {
-        if let recycled = outlineView.makeView(withIdentifier: id, owner: self) as? T {
-            return recycled
-        }
-        let cell = T()
-        cell.identifier = id
-        return cell
+        // 表示はクリック時に NSMenu を組み直すので、ここでは何もしない。
     }
 }
 
-extension KuraViewController: NSOutlineViewDataSource {
-    func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        if item == nil {
-            return appNodes.count
-        }
-        if let node = item as? AppNode {
-            scanIfNeeded(node)
-            if case .items(let items) = node.result, !items.isEmpty {
-                return items.count
+// MARK: - IconViewDelegate
+
+extension KuraViewController: IconViewDelegate {
+    func iconViewClicked(_ view: IconView) {
+        guard let node = appNodes.first(where: { $0.app.bundleIdentifier == view.app.bundleIdentifier })
+        else { return }
+        let folded = foldController?.isFolded ?? false
+        scanIfNeeded(node)
+        let menu = buildMenu(for: node, folded: folded)
+        // セル直下に NSMenu を popUp。popover は閉じない。
+        let location = NSPoint(x: 0, y: view.bounds.maxY + 2)
+        menu.popUp(positioning: nil, at: location, in: view)
+    }
+
+    private func buildMenu(for node: AppNode, folded: Bool) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        switch node.result {
+        case nil:
+            menu.addItem(disabledItem(title: "読込中…"))
+        case .notRunning:
+            menu.addItem(disabledItem(title: "起動していません"))
+        case .failed(let reason):
+            menu.addItem(disabledItem(title: "走査失敗: \(reason)"))
+        case .items(let items) where items.isEmpty:
+            menu.addItem(disabledItem(title: "メニュー項目なし"))
+        case .items(let items):
+            for child in items {
+                menu.addItem(buildMenuItem(for: child, folded: folded))
             }
-            return 1
         }
-        if let menuItem = item as? MenuBarItem {
-            return menuItem.children.count
-        }
-        return 0
+        return menu
     }
 
-    func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        if item == nil {
-            return appNodes[index]
-        }
-        if let node = item as? AppNode {
-            if case .items(let items) = node.result, !items.isEmpty {
-                return items[index]
+    private func buildMenuItem(for item: MenuBarItem, folded: Bool) -> NSMenuItem {
+        if !item.children.isEmpty {
+            let parent = NSMenuItem(title: item.title, action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            submenu.autoenablesItems = false
+            for child in item.children {
+                submenu.addItem(buildMenuItem(for: child, folded: folded))
             }
-            return node.statusRow
+            parent.submenu = submenu
+            return parent
         }
-        if let menuItem = item as? MenuBarItem {
-            return menuItem.children[index]
+        let title: String
+        let enabled: Bool
+        if item.needsExpandToFire {
+            title = "\(item.title)（折りたたみ非対応）"
+            enabled = !folded && item.isExecutable
+        } else if !item.isExecutable {
+            title = item.title
+            enabled = false
+        } else if folded && !item.isMenuItem {
+            title = item.title
+            enabled = false
+        } else {
+            title = item.title
+            enabled = true
         }
-        fatalError("unexpected outline parent: \(item ?? "nil")")
+        let nsItem = NSMenuItem(title: title, action: #selector(menuItemActivated(_:)), keyEquivalent: "")
+        nsItem.target = self
+        nsItem.representedObject = item
+        nsItem.isEnabled = enabled
+        return nsItem
     }
 
-    func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        if item is AppNode { return true }
-        if let menuItem = item as? MenuBarItem {
-            return !menuItem.children.isEmpty
-        }
-        return false
+    private func disabledItem(title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
     }
 
-    // MARK: - Drag & Drop（AppNode の並び替え）
+    @objc private func menuItemActivated(_ sender: NSMenuItem) {
+        guard let item = sender.representedObject as? MenuBarItem else { return }
+        NSLog("[Kura] menu activate: %@", item.title)
+        onItemActivated?()
+        MenuBarDispatcher.press(item)
+    }
+}
 
-    /// AppNode 行のみドラッグを許可する。bundleIdentifier をペーストボードに乗せ、acceptDrop 側で
-    /// appNodes 配列内の参照を引き直して並び替える。pid を含めないのは、ドラッグ中に scan で
-    /// AppNode が差し替わっても bundleId で同一性を引けるようにするため。
-    func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
-        guard let node = item as? AppNode else { return nil }
-        let pbItem = NSPasteboardItem()
-        pbItem.setString(node.app.bundleIdentifier, forType: Self.dragType)
-        return pbItem
+// MARK: - IconGridReorderDelegate
+
+extension KuraViewController: IconGridReorderDelegate {
+    func iconGrid(_ view: IconGridView, didReorderTo newBundleIds: [String]) {
+        // appNodes も新順序に合わせる。新順序に存在しない bundleId（あり得ないはずだが念のため）は末尾へ。
+        var remaining = appNodes
+        var reordered: [AppNode] = []
+        for id in newBundleIds {
+            if let idx = remaining.firstIndex(where: { $0.app.bundleIdentifier == id }) {
+                reordered.append(remaining.remove(at: idx))
+            }
+        }
+        reordered.append(contentsOf: remaining)
+        appNodes = reordered
+        NSLog("[Kura] reorder applied: %d", appNodes.count)
+        onReorder?(newBundleIds)
+    }
+}
+
+// MARK: - IconView
+
+/// アプリアイコン 1 個のセル。
+/// - `resetCursorRects` で `.pointingHand` を登録 → AppKit が自動でカーソル切替（push/pop スタック乱れなし）
+/// - `mouseDown/Dragged/Up` で「クリック」「ドラッグ」を自前判定。NSCollectionView の機構には依存しない
+/// - ドラッグ開始は `beginDraggingSession`（`NSDraggingSource` 自己実装）
+/// - `hitTest` で子 view (NSImageView) を素通り → mouseDown を確実に受ける
+final class IconView: NSView, NSDraggingSource {
+    let app: StatusBarApp
+    weak var delegate: IconViewDelegate?
+
+    private let backgroundView = NSView()
+    private let iconImageView = NSImageView()
+    private var trackingArea: NSTrackingArea?
+    private var mouseDownLocation: NSPoint?
+    private var dragStarted = false
+    private static let clickSlop: CGFloat = 4
+
+    init(app: StatusBarApp) {
+        self.app = app
+        super.init(frame: NSRect(origin: .zero, size: KuraViewController.cellSize))
+        wantsLayer = true
+        toolTip = app.name
+        setupSubviews()
     }
 
-    /// AppNode 行への「上にドロップ」(`index == -1`) は「その行の前の root gap」に再解釈する。
-    /// AppNode は isItemExpandable=true なので AppKit が「子として追加」と解釈してくるが、
-    /// 子はメニュー項目なので並び替え対象ではない。それ以外は root の行間ドロップのみ許可。
-    func outlineView(
-        _ outlineView: NSOutlineView,
-        validateDrop info: NSDraggingInfo,
-        proposedItem item: Any?,
-        proposedChildIndex index: Int
-    ) -> NSDragOperation {
-        if let node = item as? AppNode, index == NSOutlineViewDropOnItemIndex {
-            guard let row = appNodes.firstIndex(where: { $0 === node }) else { return [] }
-            outlineView.setDropItem(nil, dropChildIndex: row)
-            return .move
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) not supported")
+    }
+
+    private func setupSubviews() {
+        backgroundView.wantsLayer = true
+        backgroundView.layer?.cornerRadius = 6
+        backgroundView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(backgroundView)
+
+        iconImageView.image = app.icon
+        iconImageView.imageScaling = .scaleProportionallyDown
+        iconImageView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(iconImageView)
+
+        NSLayoutConstraint.activate([
+            backgroundView.topAnchor.constraint(equalTo: topAnchor),
+            backgroundView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            backgroundView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            backgroundView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            iconImageView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            iconImageView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconImageView.widthAnchor.constraint(equalToConstant: KuraViewController.iconSize),
+            iconImageView.heightAnchor.constraint(equalToConstant: KuraViewController.iconSize),
+        ])
+    }
+
+    override var intrinsicContentSize: NSSize {
+        return KuraViewController.cellSize
+    }
+
+    /// 子の NSImageView ではなく自分でマウスイベントを受けるため、hitTest を一段で打ち切る。
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // point は superview 座標系で来る。bounds は self 座標系なので変換が必要だが、
+        // 矩形内ならどこでも self を返せばよいので superview 座標系の frame で判定する。
+        return frame.contains(point) ? self : nil
+    }
+
+    override func resetCursorRects() {
+        // AppKit 標準のカーソル管理。push/pop と違ってスタック乱れがない。
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea {
+            removeTrackingArea(existing)
         }
-        guard item == nil, index >= 0 else { return [] }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        setHighlighted(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        setHighlighted(false)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        mouseDownLocation = event.locationInWindow
+        dragStarted = false
+        // super は呼ばない。AppKit のデフォルト動作（focus 取得や次レスポンダへの転送）は不要。
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !dragStarted, let start = mouseDownLocation else { return }
+        let current = event.locationInWindow
+        let distance = hypot(current.x - start.x, current.y - start.y)
+        guard distance > Self.clickSlop else { return }
+        startDrag(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer {
+            mouseDownLocation = nil
+            dragStarted = false
+        }
+        guard !dragStarted, let start = mouseDownLocation else { return }
+        let end = event.locationInWindow
+        let distance = hypot(end.x - start.x, end.y - start.y)
+        if distance <= Self.clickSlop {
+            delegate?.iconViewClicked(self)
+        }
+    }
+
+    private func startDrag(with event: NSEvent) {
+        guard let image = app.icon else { return }
+        dragStarted = true
+        let pb = NSPasteboardItem()
+        pb.setString(app.bundleIdentifier, forType: KuraViewController.dragType)
+        let draggingItem = NSDraggingItem(pasteboardWriter: pb)
+        draggingItem.setDraggingFrame(bounds, contents: image)
+        beginDraggingSession(with: [draggingItem], event: event, source: self)
+    }
+
+    private func setHighlighted(_ on: Bool) {
+        backgroundView.layer?.backgroundColor = on
+            ? NSColor.controlAccentColor.withAlphaComponent(0.2).cgColor
+            : NSColor.clear.cgColor
+    }
+
+    // MARK: NSDraggingSource
+
+    func draggingSession(_ session: NSDraggingSession,
+                         sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
         return .move
     }
 
-    func outlineView(
-        _ outlineView: NSOutlineView,
-        acceptDrop info: NSDraggingInfo,
-        item: Any?,
-        childIndex index: Int
-    ) -> Bool {
-        guard item == nil, index >= 0 else { return false }
-        guard let draggedId = info.draggingPasteboard.pasteboardItems?
-                .compactMap({ $0.string(forType: Self.dragType) }).first,
-              let oldIndex = appNodes.firstIndex(where: { $0.app.bundleIdentifier == draggedId })
+    func draggingSession(_ session: NSDraggingSession,
+                         endedAt screenPoint: NSPoint,
+                         operation: NSDragOperation) {
+        // セッション終了時にホバー状態を初期化。drag 中は mouseExited が来ないことがある。
+        setHighlighted(false)
+    }
+}
+
+// MARK: - IconGridView
+
+/// IconView を 4 列で並べるグリッド。
+/// `NSStackView` の縦 / 横ネストで自然なレイアウト、`NSDraggingDestination` で drop 位置を index に変換。
+/// 数十アイコン規模なら NSCollectionView より軽量（reuse 不要、event handling もシンプル）。
+final class IconGridView: NSView {
+    weak var reorderDelegate: IconGridReorderDelegate?
+
+    private let vStack = NSStackView()
+    private var rows: [NSStackView] = []
+    private var icons: [IconView] = []
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) not supported")
+    }
+
+    /// AppKit デフォルトは左下原点。drop 座標 → index 計算を素直に書きたいので flip する。
+    override var isFlipped: Bool { true }
+
+    private func setup() {
+        vStack.orientation = .vertical
+        vStack.alignment = .leading
+        vStack.spacing = KuraViewController.gridGap
+        vStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(vStack)
+        NSLayoutConstraint.activate([
+            vStack.topAnchor.constraint(equalTo: topAnchor, constant: KuraViewController.gridPadding),
+            vStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: KuraViewController.gridPadding),
+            vStack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -KuraViewController.gridPadding),
+            vStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -KuraViewController.gridPadding),
+        ])
+        registerForDraggedTypes([KuraViewController.dragType])
+    }
+
+    func setIcons(_ iconViews: [IconView]) {
+        for row in rows {
+            vStack.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+        rows.removeAll()
+        icons = iconViews
+        var index = 0
+        while index < iconViews.count {
+            let end = min(index + KuraViewController.columns, iconViews.count)
+            let chunk = Array(iconViews[index..<end])
+            let row = NSStackView(views: chunk)
+            row.orientation = .horizontal
+            row.alignment = .top
+            row.spacing = KuraViewController.gridGap
+            rows.append(row)
+            vStack.addArrangedSubview(row)
+            index = end
+        }
+    }
+
+    // MARK: NSDraggingDestination
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        return validate(sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        return validate(sender)
+    }
+
+    private func validate(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard sender.draggingPasteboard.types?.contains(KuraViewController.dragType) == true else { return [] }
+        return .move
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let bundleId = sender.draggingPasteboard.string(forType: KuraViewController.dragType),
+              let oldIndex = icons.firstIndex(where: { $0.app.bundleIdentifier == bundleId })
         else { return false }
-        // 「自分より下に移動」する場合、自分を remove した後の挿入位置は 1 つ手前にズレる
-        let insertAt = min(oldIndex < index ? index - 1 : index, appNodes.count - 1)
-        let node = appNodes.remove(at: oldIndex)
-        appNodes.insert(node, at: insertAt)
-        outlineView.reloadData()
-        NSLog("[Kura] dnd reorder %@ %d→%d", draggedId, oldIndex, insertAt)
-        onReorder?(appNodes.map { $0.app.bundleIdentifier })
+        let dropLocation = convert(sender.draggingLocation, from: nil)
+        let insertIndex = computeInsertIndex(at: dropLocation)
+        // 「自分より後ろに移動」する場合、自分を remove 後の挿入位置は 1 つ手前にズレる。
+        let adjusted = oldIndex < insertIndex ? insertIndex - 1 : insertIndex
+        let clamped = max(0, min(adjusted, icons.count - 1))
+        guard clamped != oldIndex else { return false }
+        let icon = icons.remove(at: oldIndex)
+        icons.insert(icon, at: clamped)
+        setIcons(icons)
+        let newOrder = icons.map { $0.app.bundleIdentifier }
+        NSLog("[Kura] dnd reorder %@ %d→%d", bundleId, oldIndex, clamped)
+        reorderDelegate?.iconGrid(self, didReorderTo: newOrder)
         return true
     }
-}
 
-extension KuraViewController: NSOutlineViewDelegate {
-    func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
-        if let node = item as? AppNode {
-            let cell: AppRowView = dequeue(Self.appCellId)
-            cell.configure(with: node.app)
-            return cell
-        }
-        if let menuItem = item as? MenuBarItem {
-            let cell: MenuItemRowView = dequeue(Self.itemCellId)
-            cell.configure(
-                title: menuItem.title,
-                isPlaceholder: false,
-                isExecutable: menuItem.isExecutable,
-                needsExpandToFire: menuItem.needsExpandToFire
-            )
-            return cell
-        }
-        if let status = item as? StatusRow {
-            let cell: MenuItemRowView = dequeue(Self.itemCellId)
-            cell.configure(title: status.text, isPlaceholder: true)
-            return cell
-        }
-        return nil
-    }
-}
-
-final class AppRowView: NSTableCellView {
-    private let iconView = NSImageView()
-    private let nameLabel = NSTextField(labelWithString: "")
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        setup()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setup()
-    }
-
-    private func setup() {
-        iconView.imageScaling = .scaleProportionallyDown
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(iconView)
-
-        nameLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        nameLabel.lineBreakMode = .byTruncatingTail
-        nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(nameLabel)
-
-        NSLayoutConstraint.activate([
-            iconView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 20),
-            iconView.heightAnchor.constraint(equalToConstant: 20),
-
-            nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
-            nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            nameLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
-        ])
-    }
-
-    func configure(with app: StatusBarApp) {
-        iconView.image = app.icon
-        nameLabel.stringValue = app.name
-    }
-}
-
-final class MenuItemRowView: NSTableCellView {
-    private let titleLabel = NSTextField(labelWithString: "")
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        setup()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setup()
-    }
-
-    private func setup() {
-        titleLabel.font = NSFont.systemFont(ofSize: 12)
-        titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(titleLabel)
-
-        NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
-        ])
-    }
-
-    func configure(title: String, isPlaceholder: Bool, isExecutable: Bool = true, needsExpandToFire: Bool = false) {
-        if needsExpandToFire {
-            // AX にメニュー情報を公開しないアプリ（Claude 等）。折りたたみ中は操作不能、
-            // 展開状態でのみ動作する。ユーザーが事前に把握できるようマーキングする。
-            titleLabel.stringValue = "\(title)（折りたたみ非対応）"
-            titleLabel.textColor = .tertiaryLabelColor
-        } else if isPlaceholder || !isExecutable {
-            titleLabel.stringValue = title
-            titleLabel.textColor = .tertiaryLabelColor
-        } else {
-            titleLabel.stringValue = title
-            titleLabel.textColor = .secondaryLabelColor
-        }
+    /// drop 座標から「挿入する index」を求める。
+    /// flipped 座標（左上原点）で行 / 列を割って、X がセル中央より右なら +1（後ろに挿入）。
+    private func computeInsertIndex(at point: NSPoint) -> Int {
+        guard !icons.isEmpty else { return 0 }
+        let cellW = KuraViewController.cellSize.width + KuraViewController.gridGap
+        let cellH = KuraViewController.cellSize.height + KuraViewController.gridGap
+        let xInGrid = max(0, point.x - KuraViewController.gridPadding)
+        let yInGrid = max(0, point.y - KuraViewController.gridPadding)
+        let rowIndex = max(0, min(Int(yInGrid / cellH), rows.count - 1))
+        let colIndexRaw = Int(xInGrid / cellW)
+        let xInCell = xInGrid.truncatingRemainder(dividingBy: cellW)
+        let extra = xInCell > KuraViewController.cellSize.width / 2 ? 1 : 0
+        let colIndex = max(0, min(colIndexRaw + extra, KuraViewController.columns))
+        let flat = rowIndex * KuraViewController.columns + colIndex
+        return min(flat, icons.count)
     }
 }
