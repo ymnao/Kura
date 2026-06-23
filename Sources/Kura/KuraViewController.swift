@@ -32,9 +32,22 @@ final class AppNode {
     }
 }
 
+/// NSOutlineView のドラッグソース側の operation mask を `.move` に明示する。
+/// デフォルトは context によって `.copy` 等に制限され、`validateDrop` で `.move` を返しても
+/// ソース側に許可がないとドロップが成立しない（OS 側で operation 0 になり accept が呼ばれない）。
+/// `.withinApplication` / `.outsideApplication` 両方で `.move` を許可する。
+private final class ReorderableOutlineView: NSOutlineView {
+    override func draggingSession(
+        _ session: NSDraggingSession,
+        sourceOperationMaskFor context: NSDraggingContext
+    ) -> NSDragOperation {
+        return .move
+    }
+}
+
 @MainActor
 final class KuraViewController: NSViewController {
-    private let outlineView = NSOutlineView()
+    private let outlineView = ReorderableOutlineView()
     private let emptyLabel = NSTextField(labelWithString: "")
     private let bannerContainer = NSView()
     private let bannerLabel = NSTextField(labelWithString: "⚠ アクセシビリティ未許可")
@@ -45,10 +58,15 @@ final class KuraViewController: NSViewController {
     private var nodeCache: [String: AppNode] = [:]
 
     var onItemActivated: (() -> Void)?
+    /// AppNode の並び替え完了時に呼ばれる。引数は新しい順序の bundleIdentifier 配列。
+    /// AppDelegate が AppOrderStore に保存する責務を持つ。
+    var onReorder: (([String]) -> Void)?
     weak var foldController: FoldController?
 
     private static let appCellId = NSUserInterfaceItemIdentifier("kura.appRow")
     private static let itemCellId = NSUserInterfaceItemIdentifier("kura.itemRow")
+    /// AppNode 行ドラッグ用のローカルペーストボード型。bundleIdentifier を string で乗せる。
+    private static let dragType = NSPasteboard.PasteboardType("kura.appRow")
 
     override func loadView() {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 420))
@@ -79,6 +97,10 @@ final class KuraViewController: NSViewController {
         outlineView.delegate = self
         outlineView.target = self
         outlineView.action = #selector(outlineViewClicked(_:))
+        outlineView.registerForDraggedTypes([Self.dragType])
+        // `.gap` は AppNode が isItemExpandable=true の場合に行間 index 計算が
+        // 不安定（常に 0 になる）症状が出るため、デフォルトの `.regular` に任せる。
+        outlineView.draggingDestinationFeedbackStyle = .regular
 
         bannerContainer.wantsLayer = true
         bannerContainer.layer?.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.15).cgColor
@@ -351,6 +373,57 @@ extension KuraViewController: NSOutlineViewDataSource {
             return !menuItem.children.isEmpty
         }
         return false
+    }
+
+    // MARK: - Drag & Drop（AppNode の並び替え）
+
+    /// AppNode 行のみドラッグを許可する。bundleIdentifier をペーストボードに乗せ、acceptDrop 側で
+    /// appNodes 配列内の参照を引き直して並び替える。pid を含めないのは、ドラッグ中に scan で
+    /// AppNode が差し替わっても bundleId で同一性を引けるようにするため。
+    func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
+        guard let node = item as? AppNode else { return nil }
+        let pbItem = NSPasteboardItem()
+        pbItem.setString(node.app.bundleIdentifier, forType: Self.dragType)
+        return pbItem
+    }
+
+    /// AppNode 行への「上にドロップ」(`index == -1`) は「その行の前の root gap」に再解釈する。
+    /// AppNode は isItemExpandable=true なので AppKit が「子として追加」と解釈してくるが、
+    /// 子はメニュー項目なので並び替え対象ではない。それ以外は root の行間ドロップのみ許可。
+    func outlineView(
+        _ outlineView: NSOutlineView,
+        validateDrop info: NSDraggingInfo,
+        proposedItem item: Any?,
+        proposedChildIndex index: Int
+    ) -> NSDragOperation {
+        if let node = item as? AppNode, index == NSOutlineViewDropOnItemIndex {
+            guard let row = appNodes.firstIndex(where: { $0 === node }) else { return [] }
+            outlineView.setDropItem(nil, dropChildIndex: row)
+            return .move
+        }
+        guard item == nil, index >= 0 else { return [] }
+        return .move
+    }
+
+    func outlineView(
+        _ outlineView: NSOutlineView,
+        acceptDrop info: NSDraggingInfo,
+        item: Any?,
+        childIndex index: Int
+    ) -> Bool {
+        guard item == nil, index >= 0 else { return false }
+        guard let draggedId = info.draggingPasteboard.pasteboardItems?
+                .compactMap({ $0.string(forType: Self.dragType) }).first,
+              let oldIndex = appNodes.firstIndex(where: { $0.app.bundleIdentifier == draggedId })
+        else { return false }
+        // 「自分より下に移動」する場合、自分を remove した後の挿入位置は 1 つ手前にズレる
+        let insertAt = min(oldIndex < index ? index - 1 : index, appNodes.count - 1)
+        let node = appNodes.remove(at: oldIndex)
+        appNodes.insert(node, at: insertAt)
+        outlineView.reloadData()
+        NSLog("[Kura] dnd reorder %@ %d→%d", draggedId, oldIndex, insertAt)
+        onReorder?(appNodes.map { $0.app.bundleIdentifier })
+        return true
     }
 }
 

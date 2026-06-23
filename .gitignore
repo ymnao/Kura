@@ -40,3 +40,6 @@ Icon
 
 # Logs
 *.log
+
+# AI agent local state
+.serena/
