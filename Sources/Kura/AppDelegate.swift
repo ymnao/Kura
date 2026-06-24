@@ -173,7 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
 
     @objc private func handleScreenParametersChanged() {
         if isFolded {
-            separatorItem.length = Self.collapsedSeparatorLength
+            setSeparatorLength(Self.collapsedSeparatorLength)
         }
     }
 
