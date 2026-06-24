@@ -253,6 +253,54 @@ v0.5 までの popover はアプリ名 + メニュー項目をネストした `N
 
 `.transient` を避けた理由は、**NSDraggingSession 後に transient の自動 close が壊れる**症状があったため（他アプリへフォーカスを移しても popover が消えない）。手動制御に切り替えることでドラッグ後も確実に close する。
 
+### カーソル制御の難所と結着
+
+popover 内のカーソル制御は、AppKit の cursor 機構が並走する複数経路を持つため厄介で、試行錯誤の末に下記の構成に着地した。
+
+**結着構成 (IconView 上でのみ `pointingHand`、外で arrow、drag 中 `closedHand`)**:
+
+- IconView は `resetCursorRects` で `addCursorRect(bounds, cursor: .pointingHand)` を登録（AppKit 標準ルート）
+- IconView は `hitTest(_:)` を override し `frame.contains(point) ? self : nil` を返す（**理由は後述**）
+- IconView の subview は `backgroundView` (NSView) 1 個のみ。アイコンは `NSImageView` ではなく **`CALayer.contents = app.icon`** で直接描画（**理由は後述**）
+- ラベル (`title`, `bannerLabel`, `emptyLabel`) は `CursorlessLabel` で実装（**理由は後述**）
+- drag 中の `closedHand` は `draggingSession(_:willBeginAt:)` で `NSCursor.closedHand.push()`、`endedAt:` で `pop()`（cursor rect では drag セッション中の cursor を上書きできないため stack に積む）
+- `popoverDidShow` で `disableCursorRects()` は **呼ばない**（cursor rect 機構を切ると IconView の `addCursorRect` も効かなくなる）
+
+**なぜ `hitTest` を override するか**:
+
+AppKit の cursor rect 評価は「カーソル位置の hit-test 結果 view」の cursor rect を採用する。`hitTest` を override せず AppKit のデフォルトに任せると、subview chain を辿って `backgroundView` を hit-test 結果として返してしまう。`backgroundView` は cursor rect を持たないため、AppKit が別経路（テキスト系の自動 I-beam 等）を採用してカーソルが I-beam になる症状が出る。
+
+`hitTest` override の point は `frame.contains(point)` で判定する。`NSView.hitTest(_:)` の point は **superview 座標系** (Apple Doc 明記)。`bounds.contains(point)` にすると 2 列目以降の IconView が hit しなくなり、D&D / クリックが乱れる。
+
+**なぜ `NSImageView` を `CALayer.contents` に置き換えたか**:
+
+`NSImageView` は cell-based view (`NSImageCell`) で、cell が **内部で cursor rect を登録する**経路を持つ。IconView が `addCursorRect(.pointingHand)` を登録しても、より深い subview (NSImageView) の cursor rect が AppKit の cursor 評価で優先採用され、I-beam 等が表示される根本原因になっていた。`CALayer` は `NSResponder` ではないので cursor rect の概念がなく、AppKit の cursor 評価に影響を与えない。
+
+**なぜ `CursorlessLabel` が必要か**:
+
+`NSTextField` は I-beam を **4 経路** で自動登録する:
+
+1. `NSView.resetCursorRects()` (legacy cursor rect)
+2. `NSCell.resetCursorRect(_:inView:)` (cell の legacy cursor rect、本丸)
+3. `NSTrackingArea` 経由の `cursorUpdate` (modern)
+4. `cursorUpdate(with:)` event 直接
+
+`labelWithString:` で `isSelectable = false` / `isEditable = false` のラベルとして作っても、上記 4 経路が独立に動いて I-beam を登録する。`CursorlessLabel` + `CursorlessLabelCell` で 4 経路を全部空 override + tracking area 全削除する。
+
+レイアウト挙動を壊さないため、`NSTextField(labelWithString:)` で正規ラベルを作ったあと `object_setClass` で view と cell を `CursorlessLabel` / `CursorlessLabelCell` に動的に差し替える方式を採る（どちらも stored property を追加していないので memory safe）。
+
+**過去の失敗パターン (避ける)**:
+
+- `mouseMoved.set()` を毎 frame ループ → AppKit の cursor 評価ループと競合してちらつく
+- `Timer` で 20Hz `set()` → 同上
+- `NSCursor.push() / pop()` ベース → drag 中以外でスタック乱れの原因
+- `disableCursorRects()` で legacy 機構を全停止 → IconView の `addCursorRect` も死ぬ
+- `cursorUpdate(with:).set()` で補強 → cursor rect と二重発火でちらつき
+- `PopoverRootView` の `cursorUpdate` で popover 外領域を arrow に → IconView と overlap して衝突
+- `hitTest` を削除して AppKit デフォルトに任せる → subview (backgroundView) が hit-test 結果になり、cursor rect 評価で I-beam が出る
+
+これらは全て試した結果 NG。`addCursorRect` + `hitTest(frame.contains)` + `CALayer 描画` + `CursorlessLabel` の組み合わせが**唯一**安定する構成。
+
 ### 代替案（A 案＝採用）と比較してボツになった選択肢
 
 | 案 | ボツ理由 |

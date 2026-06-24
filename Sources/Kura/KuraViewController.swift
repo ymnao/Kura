@@ -505,9 +505,13 @@ final class IconView: NSView, NSDraggingSource {
         return KuraViewController.cellSize
     }
 
-    /// 子の backgroundView / その sublayer ではなく自分でマウスイベントと cursor rect を受けるため、
-    /// hitTest を一段で打ち切る。AppKit の `NSView.hitTest(_:)` の point は **superview 座標系**
-    /// で渡される（Apple Doc 明記）ので、親座標系の `frame` で判定する。
+    /// hitTest を override して self を返すことで、AppKit の cursor rect 評価が IconView を
+    /// 「hit-test 結果」として扱うようにする。これがないと AppKit のデフォルト hitTest が subview
+    /// (backgroundView) を返してしまい、backgroundView は cursor rect を持たないため AppKit が
+    /// 別経路 (I-beam) を採用する症状が出る。
+    /// point の判定は `frame.contains(point)`: `NSView.hitTest(_:)` の point は **superview 座標系**
+    /// で渡される (Apple Doc 明記)。`bounds.contains(point)` にすると 2 列目以降の IconView が
+    /// hit しなくなって D&D / click が乱れる。
     override func hitTest(_ point: NSPoint) -> NSView? {
         return frame.contains(point) ? self : nil
     }
