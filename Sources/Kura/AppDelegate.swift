@@ -150,7 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         popover.delegate = self
         let vc = KuraViewController()
         vc.onItemActivated = { [weak self] in
-            self?.popover.performClose(nil)
+            self?.dismissPopover(reason: "menu item activated")
         }
         vc.onReorder = { [weak self] orderedBundleIds in
             guard let self = self else { return }
@@ -393,15 +393,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     // MARK: - 手動 close 制御（NSPopoverDelegate + 外クリック / 他アプリ activate 監視）
 
     func popoverDidShow(_ notification: Notification) {
-        // カーソル管理の段取り（順序が重要）:
-        //   1. `arrow.set()` で現在のカーソルを arrow にリセット（前回残骸を消す）。
-        //   2. `disableCursorRects()` で AppKit の自動 cursor reset 機構を切る。これがないと
-        //      view update のたびに AppKit が cursor を arrow に戻し続け、`push` した
-        //      pointingHand/closedHand が一瞬で消える（Apple Dev Forums thread 708211 の症状）。
-        //   3. 以降、IconView 内の `push/pop` で cursor stack を直接管理。
-        // 順序を逆にすると arrow リセット前の cursor (I-beam 等) が固定されてしまう。
-        NSCursor.arrow.set()
-        popover.contentViewController?.view.window?.disableCursorRects()
         startOutsideClickMonitor()
     }
 

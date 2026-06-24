@@ -39,6 +39,10 @@ final class KuraViewController: NSViewController {
 
     private var appNodes: [AppNode] = []
     private var nodeCache: [String: AppNode] = [:]
+    /// アイコンクリック時の scan 待ち Task の世代トークン。クリック時に +1 し、Task 完了時に
+    /// 「最新の request か」を比較して古い request の menu 表示を抑止する。popover 閉鎖 / 別アイコン
+    /// クリック / 外側クリック / D&D 開始 後に遅れて menu が出るのを防ぐ。
+    private var pendingMenuRequestID: UInt64 = 0
 
     var onItemActivated: (() -> Void)?
     /// AppNode の並び替え完了時に呼ばれる。引数は新しい順序の bundleIdentifier 配列。
@@ -63,11 +67,12 @@ final class KuraViewController: NSViewController {
         return grid + contentHorizontalPadding * 2
     }
 
-    /// popover の初期高さ。`loadView` の container frame と `AppDelegate.popover.contentSize` で共有する。
+    /// popover の初期高さ。実際の高さは `IconGridView.intrinsicContentSize` で再計算され、
+    /// アイコン数に追従する。この値は最初の 1 フレームの見た目を安定させる目的のみ。
     static let preferredPopoverHeight: CGFloat = 240
 
     override func loadView() {
-        let container = PopoverRootView(frame: NSRect(
+        let container = NSView(frame: NSRect(
             x: 0, y: 0,
             width: Self.preferredPopoverWidth,
             height: Self.preferredPopoverHeight
@@ -178,6 +183,14 @@ final class KuraViewController: NSViewController {
         updatePermissionBanner()
     }
 
+    /// popover 閉鎖時に pending な scan 待ち request を全部 invalidate する。
+    /// これがないと「クリック → scan 待ち中に popover を閉じる → 再オープン」で
+    /// 古いリクエストが生き残り、再オープン後に意図しない menu が出る。
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        pendingMenuRequestID &+= 1
+    }
+
     /// 進行中の全 AppNode のメニュー詳細 scan が完了するまで待ち、すべて .items（成功）かを返す。
     /// 折りたたみコミット前の判定に使う: いずれかが .failed/.notRunning なら cache 不完全のまま
     /// folded すると蔵から操作できなくなるため、folded をキャンセルすべき。
@@ -230,6 +243,11 @@ final class KuraViewController: NSViewController {
             v.onClick = { [weak self] tapped in
                 self?.handleIconClick(view: tapped)
             }
+            v.onDragStart = { [weak self] _ in
+                // D&D 開始で pending な click menu request を invalidate。drop の有無に関わらず、
+                // drag を始めた時点で click 意図は捨てる。
+                self?.pendingMenuRequestID &+= 1
+            }
             return v
         }
         gridView.setIcons(iconViews)
@@ -276,10 +294,46 @@ final class KuraViewController: NSViewController {
 
 extension KuraViewController {
     fileprivate func handleIconClick(view: IconView) {
-        guard let node = appNodes.first(where: { $0.app.bundleIdentifier == view.app.bundleIdentifier })
-        else { return }
-        let folded = foldController?.isFolded ?? false
-        scanIfNeeded(node)
+        // 待機中に setTargets が走って node / view が差し替わるケースに対応するため、bundleId だけ
+        // 捕まえて await 後に最新を引き直す。view 引数の直接保持は避ける（差し替わると stale になる）。
+        let bundleId = view.app.bundleIdentifier
+        pendingMenuRequestID &+= 1
+        let requestID = pendingMenuRequestID
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            // scan task の完了を待つ。途中で別の scan が kick されたら（setTargets で世代更新）
+            // 再 lookup して新しい task を待つ。最大 3 回までで諦める（無限ループ防止）。
+            for _ in 0..<3 {
+                guard self.pendingMenuRequestID == requestID,
+                      let node = self.appNodes.first(where: { $0.app.bundleIdentifier == bundleId })
+                else { return }
+                self.scanIfNeeded(node)
+                if let task = node.scanTask {
+                    _ = await task.value
+                    continue
+                }
+                break
+            }
+            // 最新の request か、view がまだ window に乗っているかを最終確認。
+            // popover 閉鎖 / 別アイコンクリック / 外側クリック / D&D 開始 で dismiss された場合は古い request
+            // → 表示しない。`result != nil` && `scanTask == nil` で「読込中…だけの menu」を回避
+            // (loop 後も未完了なら表示しない、次回クリックでリトライ)。
+            guard self.pendingMenuRequestID == requestID,
+                  let node = self.appNodes.first(where: { $0.app.bundleIdentifier == bundleId }),
+                  node.scanTask == nil,
+                  node.result != nil,
+                  let currentView = self.gridView.iconView(forBundleId: bundleId),
+                  currentView.window != nil
+            else { return }
+            // folded はクリック時点でなく menu 表示直前に取得。scan 待ち中にホットキー (⌃⌥⌘K) で
+            // 折りたたみ状態が変わると `needsExpandToFire` / `!isMenuItem` の enable/disable 判定が
+            // 古くなって誤った menu が出るため。
+            let folded = self.foldController?.isFolded ?? false
+            self.presentMenu(for: node, folded: folded, anchor: currentView)
+        }
+    }
+
+    private func presentMenu(for node: AppNode, folded: Bool, anchor view: IconView) {
         let menu = buildMenu(for: node, folded: folded)
         // セル直下に NSMenu を popUp。popover は閉じない。
         let location = NSPoint(x: 0, y: view.bounds.maxY + 2)
@@ -371,24 +425,33 @@ extension KuraViewController {
 // MARK: - IconView
 
 /// アプリアイコン 1 個のセル。
-/// - `resetCursorRects` で `.pointingHand` を登録 → AppKit が自動でカーソル切替（push/pop スタック乱れなし）
-/// - `mouseDown/Dragged/Up` で「クリック」「ドラッグ」を自前判定
-/// - ドラッグ開始は `beginDraggingSession`（`NSDraggingSource` 自己実装）
-/// - `hitTest` で子 view (NSImageView) を素通り → mouseDown を確実に受ける
+/// - cursor 切替は `resetCursorRects` + `addCursorRect(.pointingHand)` の AppKit 標準ルートで実装。
+///   `mouseMoved.set()` / `cursorUpdate.set()` / push/pop は AppKit 内部の cursor 評価ループと
+///   競合してちらつきを生むため使わない。
+/// - アイコン描画は `NSImageView` ではなく `CALayer.contents` で行う。`NSImageView` (cell-based view)
+///   は内部で cursor rect を登録する経路を持っていて、IconView の `pointingHand` を上書きして
+///   I-beam 等の不正な cursor が表示される根本原因になっていた。
+/// - `mouseDown/Dragged/Up` で「クリック」「ドラッグ」を自前判定。ドラッグ開始は `beginDraggingSession`。
+/// - drag 中の `closedHand` は `NSCursor.closedHand.push()` / `pop()` で cursor stack に積む。
+/// - `hitTest` を override して subview への hit を打ち切り、cursor rect と mouseDown を IconView に集める。
 final class IconView: NSView, NSDraggingSource {
     let app: StatusBarApp
     /// クリック時のコールバック。delegate protocol だと「メソッド 1 個 / 利用箇所 1 か所」で過剰なので
     /// 同ファイル内の `onItemActivated` / `onReorder` と同じ closure パターンで統一する。
     var onClick: ((IconView) -> Void)?
+    /// ドラッグ開始時のコールバック。VC 側で「scan 待ち中の click menu request」を invalidate するために
+    /// 使う（D&D は別操作なので、その時点で pending な click は捨てるべき）。
+    var onDragStart: ((IconView) -> Void)?
 
     private let backgroundView = NSView()
-    private let iconImageView = NSImageView()
+    /// アプリアイコン描画用 layer。`NSImageView` を経由しないことで cell の cursor rect 経路を排除する。
+    private let iconLayer = CALayer()
     private var trackingArea: NSTrackingArea?
     /// mouseDown 位置。クリック判定の基準。ドラッグ開始時に nil にすることでフラグ代わりに使い、
     /// `mouseUp` でこれが残っていれば「ドラッグ未開始 = クリック」と判定する。
     private var mouseDownLocation: NSPoint?
-    /// ドラッグ中フラグ。mouseMoved 中のカーソルを `pointingHand` ではなく `closedHand` に切り替える。
-    private var isDragging = false
+    /// drag 中の closedHand を `push` した状態かどうか。`pop` 漏れを防ぐ。
+    private var closedHandPushed = false
     private static let clickSlop: CGFloat = 4
 
     init(app: StatusBarApp) {
@@ -410,39 +473,50 @@ final class IconView: NSView, NSDraggingSource {
         backgroundView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(backgroundView)
 
-        iconImageView.image = app.icon
-        iconImageView.imageScaling = .scaleProportionallyDown
-        iconImageView.translatesAutoresizingMaskIntoConstraints = false
-        // NSImageView がドラッグの送受信元になると IconView の自前 D&D とぶつかる。
-        // mouseDown は isEditable=false (デフォルト) なら responder chain で IconView に届く。
-        iconImageView.unregisterDraggedTypes()
-        addSubview(iconImageView)
+        // CALayer.contents は NSImage を直接受け取れる（macOS 10.6+）。
+        // NSImageView を介さないので、cell が cursor rect を登録する経路がない。
+        iconLayer.contents = app.icon
+        iconLayer.contentsGravity = .resizeAspect
+        iconLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
+        backgroundView.layer?.addSublayer(iconLayer)
 
         NSLayoutConstraint.activate([
             backgroundView.topAnchor.constraint(equalTo: topAnchor),
             backgroundView.leadingAnchor.constraint(equalTo: leadingAnchor),
             backgroundView.trailingAnchor.constraint(equalTo: trailingAnchor),
             backgroundView.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            iconImageView.centerXAnchor.constraint(equalTo: centerXAnchor),
-            iconImageView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconImageView.widthAnchor.constraint(equalToConstant: KuraViewController.iconSize),
-            iconImageView.heightAnchor.constraint(equalToConstant: KuraViewController.iconSize),
         ])
+    }
+
+    override func layout() {
+        super.layout()
+        // iconLayer は backgroundView.layer 内、中央配置。
+        let s = KuraViewController.iconSize
+        iconLayer.frame = NSRect(
+            x: (bounds.width - s) / 2,
+            y: (bounds.height - s) / 2,
+            width: s,
+            height: s
+        )
     }
 
     override var intrinsicContentSize: NSSize {
         return KuraViewController.cellSize
     }
 
-    /// 子の NSImageView / backgroundView ではなく自分でマウスイベントとカーソル rect を受けるため、
-    /// hitTest を一段で打ち切る。これがないと subview に hit が降りて `resetCursorRects` で登録した
-    /// pointingHand が effectsless になり、矢印カーソルに戻ってしまう（AppKit の cursor rect は
-    /// 階層を上に登らない）。
-    /// `NSView.hitTest(_:)` の point は **superview 座標系** で渡される（Apple Doc 明記）ので、
-    /// 親座標系の `frame` で判定する。
+    /// 子の backgroundView / その sublayer ではなく自分でマウスイベントと cursor rect を受けるため、
+    /// hitTest を一段で打ち切る。AppKit の `NSView.hitTest(_:)` の point は **superview 座標系**
+    /// で渡される（Apple Doc 明記）ので、親座標系の `frame` で判定する。
     override func hitTest(_ point: NSPoint) -> NSView? {
         return frame.contains(point) ? self : nil
+    }
+
+    /// AppKit 標準の cursor rect 機構。`addCursorRect` 内の bounds に入ると AppKit が自動で
+    /// `pointingHand` に切り替え、外れると元に戻す。set() ベースの自前ループと違って AppKit の
+    /// cursor 評価ループと協調動作するため、ちらつき経路が発生しない。
+    /// drag 中の `closedHand` は別経路（`draggingSession.willBeginAt` で `push`）。
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
     }
 
     override func updateTrackingAreas() {
@@ -452,17 +526,14 @@ final class IconView: NSView, NSDraggingSource {
 
     /// init からも `updateTrackingAreas` 経由でも呼ぶ。`updateTrackingAreas` の初回呼び出しが
     /// popover 内で必ずしも走らないため、init で確実に installation する。
+    /// hover ハイライト用に `.mouseEnteredAndExited` のみ。cursor は `resetCursorRects` の経路に任せる。
     private func installTrackingArea() {
         if let existing = trackingArea {
             removeTrackingArea(existing)
         }
-        // `.mouseMoved` で mouseMoved event を毎 frame 受けて、cursor を `set()` し続ける。
-        // AppKit には disableCursorRects 後でも cursor を arrow に戻す経路があり、push したものも
-        // 一瞬で消える症状が出る。set を mouseMoved の頻度で繰り返すと AppKit の reset の直後に
-        // 必ず上書きできるので、表示上は意図の cursor が持続する。
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.activeAlways, .mouseEnteredAndExited, .cursorUpdate, .mouseMoved, .inVisibleRect],
+            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -470,30 +541,12 @@ final class IconView: NSView, NSDraggingSource {
         trackingArea = area
     }
 
-    override func cursorUpdate(with event: NSEvent) {
-        applyCursor()
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        // AppKit の cursor reset 経路を上書きし続けるため、毎 frame set する。
-        applyCursor()
-    }
-
     override func mouseEntered(with event: NSEvent) {
-        applyCursor()
         setHighlighted(true)
     }
 
     override func mouseExited(with event: NSEvent) {
         setHighlighted(false)
-    }
-
-    private func applyCursor() {
-        if isDragging {
-            NSCursor.closedHand.set()
-        } else {
-            NSCursor.pointingHand.set()
-        }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -524,6 +577,8 @@ final class IconView: NSView, NSDraggingSource {
         // mouseDownLocation を nil にすることで「ドラッグ開始済み」フラグを兼ねる。
         // この後の mouseUp は guard で早期 return し、クリック扱いにならない。
         mouseDownLocation = nil
+        // VC に通知して pending な click menu request を invalidate させる。
+        onDragStart?(self)
         let pb = NSPasteboardItem()
         pb.setString(app.bundleIdentifier, forType: KuraViewController.dragType)
         let draggingItem = NSDraggingItem(pasteboardWriter: pb)
@@ -537,6 +592,16 @@ final class IconView: NSView, NSDraggingSource {
             : NSColor.clear.cgColor
     }
 
+    /// drag 中に view が解放されると closedHand の `pop` 漏れで cursor stack が乱れるので、
+    /// window から外れる時点で確実に pop しておく。
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil, closedHandPushed {
+            NSCursor.pop()
+            closedHandPushed = false
+        }
+    }
+
     // MARK: NSDraggingSource
 
     func draggingSession(_ session: NSDraggingSession,
@@ -546,15 +611,22 @@ final class IconView: NSView, NSDraggingSource {
 
     func draggingSession(_ session: NSDraggingSession,
                          willBeginAt screenPoint: NSPoint) {
-        isDragging = true
-        NSCursor.closedHand.set()
+        // closedHand を cursor stack に積む。`set()` と違い、AppKit の cursor 評価ループでも
+        // stack の trailing edge が選ばれ続けるので drag 中は持続する。
+        if !closedHandPushed {
+            NSCursor.closedHand.push()
+            closedHandPushed = true
+        }
     }
 
     func draggingSession(_ session: NSDraggingSession,
                          endedAt screenPoint: NSPoint,
                          operation: NSDragOperation) {
-        isDragging = false
         setHighlighted(false)
+        if closedHandPushed {
+            NSCursor.pop()
+            closedHandPushed = false
+        }
     }
 }
 
@@ -565,7 +637,9 @@ final class IconView: NSView, NSDraggingSource {
 /// 数十アイコン規模なら NSCollectionView より軽量（reuse 不要、event handling もシンプル）。
 final class IconGridView: NSView {
     /// 並び替え完了時に「どこからどこへ動いた」を通知する。`from < to` 補正は IconGridView 側で済み、
-    /// 受け手は自分のデータ配列に同じ `move(from:to:)` を当てるだけでよい（appNodes との二重 source-of-truth を防ぐ）。
+    /// 受け手は自分のデータ配列にも同じ `move(from:to:)` を当てて view と順序を同期する責務。
+    /// （IconGridView 側は view 配列 `icons` を再構築済み、KuraViewController 側は data 配列 `appNodes` を
+    /// 更新する役割分担。同じ操作が view / data 両側で起きるが、責務分離としてこの並走を許容する。）
     var onReorder: ((_ from: Int, _ to: Int) -> Void)?
 
     private let vStack = NSStackView()
@@ -608,6 +682,13 @@ final class IconGridView: NSView {
         addSubview(dropIndicator)
 
         registerForDraggedTypes([KuraViewController.dragType])
+    }
+
+    /// クリック時の menu popUp のアンカーを引き直すための lookup。
+    /// 直接 IconView 参照を引き継ぐと `setTargets` で view が再生成された後に stale になるため、
+    /// bundleId 経由で「現時点で表示中の IconView」を取り直す。
+    func iconView(forBundleId bundleId: String) -> IconView? {
+        return icons.first { $0.app.bundleIdentifier == bundleId }
     }
 
     func setIcons(_ iconViews: [IconView]) {
@@ -756,51 +837,5 @@ final class IconGridView: NSView {
         let colIndex = max(0, min(colIndexRaw + extra, KuraViewController.columns))
         let flat = rowIndex * KuraViewController.columns + colIndex
         return min(flat, icons.count)
-    }
-}
-
-// MARK: - PopoverRootView
-
-/// popover 全体のルート view。`cursorUpdate` で `arrow` を明示する。
-/// AppKit は階層で最も深い `cursorUpdate` を持つ view を採用するため、
-/// IconView 領域では IconView 側の `cursorUpdate`（pointingHand）が優先される。
-/// これがないと、popover の window エッジに AppKit が貼る resize cursor や、
-/// 子 view の cursor rect の残滓（I-beam など）が popover 内に漏れる。
-private final class PopoverRootView: NSView {
-    private var trackingArea: NSTrackingArea?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        installTrackingArea()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        installTrackingArea()
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        installTrackingArea()
-    }
-
-    private func installTrackingArea() {
-        if let existing = trackingArea {
-            removeTrackingArea(existing)
-        }
-        // `.inVisibleRect` があるので rect 自体は使われないが、API として渡す必要あり。
-        // init から呼ぶので bounds がまだ確定していないことに依存しない。
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.activeAlways, .cursorUpdate, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        trackingArea = area
-    }
-
-    override func cursorUpdate(with event: NSEvent) {
-        NSCursor.arrow.set()
     }
 }
