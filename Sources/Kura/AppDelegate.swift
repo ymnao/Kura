@@ -51,9 +51,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// FoldController 実装。cache 不完全な項目クリック時の選択的自動展開で使われる。
     func expandIfFolded() {
         if isFolded {
-            separatorItem.length = Self.expandedSeparatorLength
-            updateStatusIcon()
+            setSeparatorLength(Self.expandedSeparatorLength)
         }
+    }
+
+    /// 折りたたみ length 変更の単一 entry point。`separatorItem.length` 変更と蔵アイコン更新の
+    /// 不変条件 (length が変わったら fold 状態判定が変わるので icon も追従) を 1 箇所に集約する。
+    private func setSeparatorLength(_ length: CGFloat) {
+        separatorItem.length = length
+        updateStatusIcon()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -94,14 +100,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         statusItem.autosaveName = "kura.main"
         statusItem.isVisible = true
         guard let button = statusItem.button else { return }
-        button.imagePosition = .imageOnly
         button.target = self
         button.action = #selector(statusItemClicked(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        // updateStatusIcon() は applicationDidFinishLaunching で setupSeparatorItem 後に呼ぶ
+        // image / imagePosition は updateStatusIcon() が責任を持つ。
+        // updateStatusIcon() 自体は applicationDidFinishLaunching で setupSeparatorItem 後に呼ぶ。
     }
 
-    /// 蔵アイコンの SF Symbol を現在の fold 状態に合わせて差し替える。
+    /// 蔵アイコン用 SF Symbol を起動時に 1 度だけ build して保持する。
+    /// fold/expand のたびに NSImage と SymbolConfiguration を作り直すのを避ける。
+    private static let expandedIcon: NSImage? = makeKuraIcon(systemName: "archivebox", description: "蔵 (展開中)")
+    private static let foldedIcon: NSImage? = makeKuraIcon(systemName: "archivebox.fill", description: "蔵 (折りたたみ中)")
+
+    private static func makeKuraIcon(systemName: String, description: String) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+        let image = NSImage(systemSymbolName: systemName, accessibilityDescription: description)?
+            .withSymbolConfiguration(config)
+        image?.isTemplate = true
+        return image
+    }
+
+    /// 蔵アイコンを現在の fold 状態に合わせて差し替える。
     /// 折りたたみ中: `archivebox.fill`（中に格納されている／閉じた印象）
     /// 展開中:       `archivebox`（開いている／覗ける印象）
     /// `separatorItem.length` を変更した**後**に呼ぶこと（`isFolded` は length で判定するため）。
@@ -109,19 +128,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// SF Symbol load 失敗時は「蔵」テキストにフォールバック（最低限の視認性を保つ）。
     private func updateStatusIcon() {
         guard let button = statusItem.button else { return }
-        let folded = isFolded
-        let symbolName = folded ? "archivebox.fill" : "archivebox"
-        let description = folded ? "蔵 (折りたたみ中)" : "蔵 (展開中)"
-        if let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: description) {
-            let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
-            let configured = symbol.withSymbolConfiguration(config) ?? symbol
-            configured.isTemplate = true
+        if let icon = isFolded ? Self.foldedIcon : Self.expandedIcon {
             button.imagePosition = .imageOnly
-            button.image = configured
-            NSLog("[Kura] updateStatusIcon: %@ size=%.0fx%.0f",
-                  symbolName, configured.size.width, configured.size.height)
+            button.image = icon
         } else {
-            NSLog("[Kura] updateStatusIcon: symbol %@ NOT FOUND — fallback to text", symbolName)
+            NSLog("[Kura] updateStatusIcon: SF Symbol unavailable — fallback to text")
             button.image = nil
             button.imagePosition = .noImage
             button.title = "蔵"
@@ -347,8 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
 
     @objc private func toggleFold(_ sender: Any?) {
         if isFolded {
-            separatorItem.length = Self.expandedSeparatorLength
-            updateStatusIcon()
+            setSeparatorLength(Self.expandedSeparatorLength)
             return
         }
         guard isSeparatorOnLeftOfMain else { return }
@@ -416,8 +426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     }
 
     private func commitFold() {
-        separatorItem.length = Self.collapsedSeparatorLength
-        updateStatusIcon()
+        setSeparatorLength(Self.collapsedSeparatorLength)
         NSLog("[Kura] commitFold sepLen=%.0f lastScanResult=%d", separatorItem.length, lastScanResult.count)
     }
 
