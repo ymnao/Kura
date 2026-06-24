@@ -28,16 +28,6 @@ final class AppNode {
 }
 
 @MainActor
-protocol IconViewDelegate: AnyObject {
-    func iconViewClicked(_ view: IconView)
-}
-
-@MainActor
-protocol IconGridReorderDelegate: AnyObject {
-    func iconGrid(_ view: IconGridView, didReorderTo newBundleIds: [String])
-}
-
-@MainActor
 final class KuraViewController: NSViewController {
     private let gridView = IconGridView()
     private let scrollView = NSScrollView()
@@ -73,11 +63,14 @@ final class KuraViewController: NSViewController {
         return grid + contentHorizontalPadding * 2
     }
 
+    /// popover の初期高さ。`loadView` の container frame と `AppDelegate.popover.contentSize` で共有する。
+    static let preferredPopoverHeight: CGFloat = 240
+
     override func loadView() {
-        let container = NSView(frame: NSRect(
+        let container = PopoverRootView(frame: NSRect(
             x: 0, y: 0,
             width: Self.preferredPopoverWidth,
-            height: 240
+            height: Self.preferredPopoverHeight
         ))
 
         let title = NSTextField(labelWithString: "蔵")
@@ -116,7 +109,9 @@ final class KuraViewController: NSViewController {
         bannerHeightConstraint.isActive = true
 
         gridView.translatesAutoresizingMaskIntoConstraints = false
-        gridView.reorderDelegate = self
+        gridView.onReorder = { [weak self] from, to in
+            self?.handleReorder(from: from, to: to)
+        }
 
         scrollView.hasVerticalScroller = true
         scrollView.scrollerStyle = .overlay
@@ -126,6 +121,15 @@ final class KuraViewController: NSViewController {
         scrollView.documentView = gridView
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(scrollView)
+
+        // NSScrollView は documentView に自動で constraint を貼らないので、明示的に bind する。
+        // 幅は clipView 幅に固定（縦スクロール専用）、高さは `IconGridView.intrinsicContentSize` で決まる。
+        // これがないと documentView の frame が伸びず、アイコンが popover 高さを超えた行はスクロールできない。
+        NSLayoutConstraint.activate([
+            gridView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            gridView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            gridView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+        ])
 
         emptyLabel.stringValue = "蔵の左にアイコンがありません\n\n隠したいメニューバーアイコンを\n蔵の左側にドラッグしてください"
         emptyLabel.font = NSFont.systemFont(ofSize: 11)
@@ -223,7 +227,9 @@ final class KuraViewController: NSViewController {
         }
         let iconViews = appNodes.map { node -> IconView in
             let v = IconView(app: node.app)
-            v.delegate = self
+            v.onClick = { [weak self] tapped in
+                self?.handleIconClick(view: tapped)
+            }
             return v
         }
         gridView.setIcons(iconViews)
@@ -266,10 +272,10 @@ final class KuraViewController: NSViewController {
     }
 }
 
-// MARK: - IconViewDelegate
+// MARK: - クリック → NSMenu
 
-extension KuraViewController: IconViewDelegate {
-    func iconViewClicked(_ view: IconView) {
+extension KuraViewController {
+    fileprivate func handleIconClick(view: IconView) {
         guard let node = appNodes.first(where: { $0.app.bundleIdentifier == view.app.bundleIdentifier })
         else { return }
         let folded = foldController?.isFolded ?? false
@@ -347,22 +353,18 @@ extension KuraViewController: IconViewDelegate {
     }
 }
 
-// MARK: - IconGridReorderDelegate
+// MARK: - 並び替え
 
-extension KuraViewController: IconGridReorderDelegate {
-    func iconGrid(_ view: IconGridView, didReorderTo newBundleIds: [String]) {
-        // appNodes も新順序に合わせる。新順序に存在しない bundleId（あり得ないはずだが念のため）は末尾へ。
-        var remaining = appNodes
-        var reordered: [AppNode] = []
-        for id in newBundleIds {
-            if let idx = remaining.firstIndex(where: { $0.app.bundleIdentifier == id }) {
-                reordered.append(remaining.remove(at: idx))
-            }
-        }
-        reordered.append(contentsOf: remaining)
-        appNodes = reordered
-        NSLog("[Kura] reorder applied: %d", appNodes.count)
-        onReorder?(newBundleIds)
+extension KuraViewController {
+    fileprivate func handleReorder(from oldIndex: Int, to newIndex: Int) {
+        guard oldIndex != newIndex,
+              appNodes.indices.contains(oldIndex),
+              appNodes.indices.contains(newIndex) else { return }
+        let node = appNodes.remove(at: oldIndex)
+        appNodes.insert(node, at: newIndex)
+        let newOrder = appNodes.map { $0.app.bundleIdentifier }
+        NSLog("[Kura] reorder applied %d→%d", oldIndex, newIndex)
+        onReorder?(newOrder)
     }
 }
 
@@ -370,18 +372,23 @@ extension KuraViewController: IconGridReorderDelegate {
 
 /// アプリアイコン 1 個のセル。
 /// - `resetCursorRects` で `.pointingHand` を登録 → AppKit が自動でカーソル切替（push/pop スタック乱れなし）
-/// - `mouseDown/Dragged/Up` で「クリック」「ドラッグ」を自前判定。NSCollectionView の機構には依存しない
+/// - `mouseDown/Dragged/Up` で「クリック」「ドラッグ」を自前判定
 /// - ドラッグ開始は `beginDraggingSession`（`NSDraggingSource` 自己実装）
 /// - `hitTest` で子 view (NSImageView) を素通り → mouseDown を確実に受ける
 final class IconView: NSView, NSDraggingSource {
     let app: StatusBarApp
-    weak var delegate: IconViewDelegate?
+    /// クリック時のコールバック。delegate protocol だと「メソッド 1 個 / 利用箇所 1 か所」で過剰なので
+    /// 同ファイル内の `onItemActivated` / `onReorder` と同じ closure パターンで統一する。
+    var onClick: ((IconView) -> Void)?
 
     private let backgroundView = NSView()
     private let iconImageView = NSImageView()
     private var trackingArea: NSTrackingArea?
+    /// mouseDown 位置。クリック判定の基準。ドラッグ開始時に nil にすることでフラグ代わりに使い、
+    /// `mouseUp` でこれが残っていれば「ドラッグ未開始 = クリック」と判定する。
     private var mouseDownLocation: NSPoint?
-    private var dragStarted = false
+    /// ドラッグ中フラグ。mouseMoved 中のカーソルを `pointingHand` ではなく `closedHand` に切り替える。
+    private var isDragging = false
     private static let clickSlop: CGFloat = 4
 
     init(app: StatusBarApp) {
@@ -390,6 +397,7 @@ final class IconView: NSView, NSDraggingSource {
         wantsLayer = true
         toolTip = app.name
         setupSubviews()
+        installTrackingArea()
     }
 
     required init?(coder: NSCoder) {
@@ -405,6 +413,9 @@ final class IconView: NSView, NSDraggingSource {
         iconImageView.image = app.icon
         iconImageView.imageScaling = .scaleProportionallyDown
         iconImageView.translatesAutoresizingMaskIntoConstraints = false
+        // NSImageView がドラッグの送受信元になると IconView の自前 D&D とぶつかる。
+        // mouseDown は isEditable=false (デフォルト) なら responder chain で IconView に届く。
+        iconImageView.unregisterDraggedTypes()
         addSubview(iconImageView)
 
         NSLayoutConstraint.activate([
@@ -424,26 +435,34 @@ final class IconView: NSView, NSDraggingSource {
         return KuraViewController.cellSize
     }
 
-    /// 子の NSImageView ではなく自分でマウスイベントを受けるため、hitTest を一段で打ち切る。
+    /// 子の NSImageView / backgroundView ではなく自分でマウスイベントとカーソル rect を受けるため、
+    /// hitTest を一段で打ち切る。これがないと subview に hit が降りて `resetCursorRects` で登録した
+    /// pointingHand が effectsless になり、矢印カーソルに戻ってしまう（AppKit の cursor rect は
+    /// 階層を上に登らない）。
+    /// `NSView.hitTest(_:)` の point は **superview 座標系** で渡される（Apple Doc 明記）ので、
+    /// 親座標系の `frame` で判定する。
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // point は superview 座標系で来る。bounds は self 座標系なので変換が必要だが、
-        // 矩形内ならどこでも self を返せばよいので superview 座標系の frame で判定する。
         return frame.contains(point) ? self : nil
-    }
-
-    override func resetCursorRects() {
-        // AppKit 標準のカーソル管理。push/pop と違ってスタック乱れがない。
-        addCursorRect(bounds, cursor: .pointingHand)
     }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
+        installTrackingArea()
+    }
+
+    /// init からも `updateTrackingAreas` 経由でも呼ぶ。`updateTrackingAreas` の初回呼び出しが
+    /// popover 内で必ずしも走らないため、init で確実に installation する。
+    private func installTrackingArea() {
         if let existing = trackingArea {
             removeTrackingArea(existing)
         }
+        // `.mouseMoved` で mouseMoved event を毎 frame 受けて、cursor を `set()` し続ける。
+        // AppKit には disableCursorRects 後でも cursor を arrow に戻す経路があり、push したものも
+        // 一瞬で消える症状が出る。set を mouseMoved の頻度で繰り返すと AppKit の reset の直後に
+        // 必ず上書きできるので、表示上は意図の cursor が持続する。
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+            options: [.activeAlways, .mouseEnteredAndExited, .cursorUpdate, .mouseMoved, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -451,7 +470,17 @@ final class IconView: NSView, NSDraggingSource {
         trackingArea = area
     }
 
+    override func cursorUpdate(with event: NSEvent) {
+        applyCursor()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        // AppKit の cursor reset 経路を上書きし続けるため、毎 frame set する。
+        applyCursor()
+    }
+
     override func mouseEntered(with event: NSEvent) {
+        applyCursor()
         setHighlighted(true)
     }
 
@@ -459,14 +488,21 @@ final class IconView: NSView, NSDraggingSource {
         setHighlighted(false)
     }
 
+    private func applyCursor() {
+        if isDragging {
+            NSCursor.closedHand.set()
+        } else {
+            NSCursor.pointingHand.set()
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
         mouseDownLocation = event.locationInWindow
-        dragStarted = false
         // super は呼ばない。AppKit のデフォルト動作（focus 取得や次レスポンダへの転送）は不要。
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard !dragStarted, let start = mouseDownLocation else { return }
+        guard let start = mouseDownLocation else { return }
         let current = event.locationInWindow
         let distance = hypot(current.x - start.x, current.y - start.y)
         guard distance > Self.clickSlop else { return }
@@ -474,21 +510,20 @@ final class IconView: NSView, NSDraggingSource {
     }
 
     override func mouseUp(with event: NSEvent) {
-        defer {
-            mouseDownLocation = nil
-            dragStarted = false
-        }
-        guard !dragStarted, let start = mouseDownLocation else { return }
+        defer { mouseDownLocation = nil }
+        guard let start = mouseDownLocation else { return }
         let end = event.locationInWindow
         let distance = hypot(end.x - start.x, end.y - start.y)
         if distance <= Self.clickSlop {
-            delegate?.iconViewClicked(self)
+            onClick?(self)
         }
     }
 
     private func startDrag(with event: NSEvent) {
         guard let image = app.icon else { return }
-        dragStarted = true
+        // mouseDownLocation を nil にすることで「ドラッグ開始済み」フラグを兼ねる。
+        // この後の mouseUp は guard で早期 return し、クリック扱いにならない。
+        mouseDownLocation = nil
         let pb = NSPasteboardItem()
         pb.setString(app.bundleIdentifier, forType: KuraViewController.dragType)
         let draggingItem = NSDraggingItem(pasteboardWriter: pb)
@@ -510,9 +545,15 @@ final class IconView: NSView, NSDraggingSource {
     }
 
     func draggingSession(_ session: NSDraggingSession,
+                         willBeginAt screenPoint: NSPoint) {
+        isDragging = true
+        NSCursor.closedHand.set()
+    }
+
+    func draggingSession(_ session: NSDraggingSession,
                          endedAt screenPoint: NSPoint,
                          operation: NSDragOperation) {
-        // セッション終了時にホバー状態を初期化。drag 中は mouseExited が来ないことがある。
+        isDragging = false
         setHighlighted(false)
     }
 }
@@ -523,11 +564,16 @@ final class IconView: NSView, NSDraggingSource {
 /// `NSStackView` の縦 / 横ネストで自然なレイアウト、`NSDraggingDestination` で drop 位置を index に変換。
 /// 数十アイコン規模なら NSCollectionView より軽量（reuse 不要、event handling もシンプル）。
 final class IconGridView: NSView {
-    weak var reorderDelegate: IconGridReorderDelegate?
+    /// 並び替え完了時に「どこからどこへ動いた」を通知する。`from < to` 補正は IconGridView 側で済み、
+    /// 受け手は自分のデータ配列に同じ `move(from:to:)` を当てるだけでよい（appNodes との二重 source-of-truth を防ぐ）。
+    var onReorder: ((_ from: Int, _ to: Int) -> Void)?
 
     private let vStack = NSStackView()
     private var rows: [NSStackView] = []
     private var icons: [IconView] = []
+    /// drop 位置に描く縦線インジケータ。NSCollectionView 標準の drop indicator 代わり。
+    private let dropIndicator = NSView()
+    private static let indicatorWidth: CGFloat = 2
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -553,6 +599,14 @@ final class IconGridView: NSView {
             vStack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -KuraViewController.gridPadding),
             vStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -KuraViewController.gridPadding),
         ])
+
+        // dropIndicator は IconGridView の絶対座標で manual frame 配置する。
+        dropIndicator.wantsLayer = true
+        dropIndicator.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        dropIndicator.layer?.cornerRadius = 1
+        dropIndicator.isHidden = true
+        addSubview(dropIndicator)
+
         registerForDraggedTypes([KuraViewController.dragType])
     }
 
@@ -575,6 +629,25 @@ final class IconGridView: NSView {
             vStack.addArrangedSubview(row)
             index = end
         }
+        // documentView の intrinsicContentSize が変わったので NSScrollView に再計算させる。
+        // これがないとアイコン数が増えた時に下の行がスクロール範囲外になる。
+        invalidateIntrinsicContentSize()
+    }
+
+    /// NSScrollView の `documentView` として正しい content height を提供する。
+    /// 横は `noIntrinsicMetric` のまま（scrollView の clipView 幅に合わせる）。
+    override var intrinsicContentSize: NSSize {
+        let cellH = KuraViewController.cellSize.height
+        let gap = KuraViewController.gridGap
+        let pad = KuraViewController.gridPadding
+        let rowCount = rows.count
+        let height: CGFloat
+        if rowCount == 0 {
+            height = pad * 2
+        } else {
+            height = pad * 2 + CGFloat(rowCount) * cellH + CGFloat(rowCount - 1) * gap
+        }
+        return NSSize(width: NSView.noIntrinsicMetric, height: height)
     }
 
     // MARK: NSDraggingDestination
@@ -587,12 +660,31 @@ final class IconGridView: NSView {
         return validate(sender)
     }
 
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        hideDropIndicator()
+    }
+
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        hideDropIndicator()
+    }
+
     private func validate(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard sender.draggingPasteboard.types?.contains(KuraViewController.dragType) == true else { return [] }
+        guard sender.draggingPasteboard.types?.contains(KuraViewController.dragType) == true else {
+            hideDropIndicator()
+            return []
+        }
+        let local = convert(sender.draggingLocation, from: nil)
+        let insertIndex = computeInsertIndex(at: local)
+        updateDropIndicator(at: insertIndex)
         return .move
     }
 
+    private func hideDropIndicator() {
+        dropIndicator.isHidden = true
+    }
+
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        hideDropIndicator()
         guard let bundleId = sender.draggingPasteboard.string(forType: KuraViewController.dragType),
               let oldIndex = icons.firstIndex(where: { $0.app.bundleIdentifier == bundleId })
         else { return false }
@@ -602,13 +694,51 @@ final class IconGridView: NSView {
         let adjusted = oldIndex < insertIndex ? insertIndex - 1 : insertIndex
         let clamped = max(0, min(adjusted, icons.count - 1))
         guard clamped != oldIndex else { return false }
-        let icon = icons.remove(at: oldIndex)
-        icons.insert(icon, at: clamped)
-        setIcons(icons)
-        let newOrder = icons.map { $0.app.bundleIdentifier }
+        moveIcon(from: oldIndex, to: clamped)
         NSLog("[Kura] dnd reorder %@ %d→%d", bundleId, oldIndex, clamped)
-        reorderDelegate?.iconGrid(self, didReorderTo: newOrder)
+        onReorder?(oldIndex, clamped)
         return true
+    }
+
+    private func moveIcon(from oldIndex: Int, to newIndex: Int) {
+        let icon = icons.remove(at: oldIndex)
+        icons.insert(icon, at: newIndex)
+        setIcons(icons)
+    }
+
+    /// `computeInsertIndex` の結果から drop indicator の frame を計算して表示。
+    /// 基準は NSStackView が実際に配置した IconView の frame（grid 定数の掛け算ではなく実 layout に追従）。
+    /// 末尾挿入 (insertIndex == icons.count) は「最終 cell の右側」、それ以外は「cell colIndex の左側」の gap 中央に縦線。
+    private func updateDropIndicator(at insertIndex: Int) {
+        guard !icons.isEmpty else {
+            hideDropIndicator()
+            return
+        }
+        let gap = KuraViewController.gridGap
+        let displayIndex: Int
+        let placeAfter: Bool
+        if insertIndex >= icons.count {
+            displayIndex = icons.count - 1
+            placeAfter = true
+        } else {
+            displayIndex = insertIndex
+            placeAfter = false
+        }
+        let target = icons[displayIndex]
+        let frameInGrid = convert(target.bounds, from: target)
+        let x: CGFloat
+        if placeAfter {
+            x = frameInGrid.maxX + gap / 2 - Self.indicatorWidth / 2
+        } else {
+            x = frameInGrid.minX - gap / 2 - Self.indicatorWidth / 2
+        }
+        dropIndicator.frame = NSRect(
+            x: x,
+            y: frameInGrid.minY,
+            width: Self.indicatorWidth,
+            height: frameInGrid.height
+        )
+        dropIndicator.isHidden = false
     }
 
     /// drop 座標から「挿入する index」を求める。
@@ -626,5 +756,51 @@ final class IconGridView: NSView {
         let colIndex = max(0, min(colIndexRaw + extra, KuraViewController.columns))
         let flat = rowIndex * KuraViewController.columns + colIndex
         return min(flat, icons.count)
+    }
+}
+
+// MARK: - PopoverRootView
+
+/// popover 全体のルート view。`cursorUpdate` で `arrow` を明示する。
+/// AppKit は階層で最も深い `cursorUpdate` を持つ view を採用するため、
+/// IconView 領域では IconView 側の `cursorUpdate`（pointingHand）が優先される。
+/// これがないと、popover の window エッジに AppKit が貼る resize cursor や、
+/// 子 view の cursor rect の残滓（I-beam など）が popover 内に漏れる。
+private final class PopoverRootView: NSView {
+    private var trackingArea: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        installTrackingArea()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        installTrackingArea()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        installTrackingArea()
+    }
+
+    private func installTrackingArea() {
+        if let existing = trackingArea {
+            removeTrackingArea(existing)
+        }
+        // `.inVisibleRect` があるので rect 自体は使われないが、API として渡す必要あり。
+        // init から呼ぶので bounds がまだ確定していないことに依存しない。
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.activeAlways, .cursorUpdate, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        NSCursor.arrow.set()
     }
 }

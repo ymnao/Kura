@@ -136,7 +136,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     private func setupPopover() {
         popover = NSPopover()
         // 4 列グリッドの幅に合わせる。高さは AppKit が VC の intrinsic size から決める。
-        popover.contentSize = NSSize(width: KuraViewController.preferredPopoverWidth, height: 260)
+        popover.contentSize = NSSize(
+            width: KuraViewController.preferredPopoverWidth,
+            height: KuraViewController.preferredPopoverHeight
+        )
         // `.transient` は内部で NSDraggingSession を回すと壊れるケースがあるため避ける（D&D 後に
         // 他アプリへフォーカスを移しても close が走らなくなる）。手動 close 制御に切り替え:
         //   - 蔵アイコン再クリック → togglePopover で close（既存）
@@ -279,6 +282,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     }
 
     private func showContextMenu(from button: NSStatusBarButton) {
+        // popover を開いた状態で右クリックすると、`.applicationDefined` なので自動 close が走らず
+        // popover とコンテキストメニューが同時に残り、その先で「折りたたむ」を選ぶと折りたたみ後も
+        // popover が居座る。先に明示的に閉じておく。
+        dismissPopover(reason: "context menu")
+
         // メニュー操作（数百 ms ある）の裏で scan を kick。
         // 「ポップオーバーを開かずに折りたたみ」の場合でも、cache 最新化を間に合わせる狙い。
         startScan()
@@ -385,6 +393,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     // MARK: - 手動 close 制御（NSPopoverDelegate + 外クリック / 他アプリ activate 監視）
 
     func popoverDidShow(_ notification: Notification) {
+        // カーソル管理の段取り（順序が重要）:
+        //   1. `arrow.set()` で現在のカーソルを arrow にリセット（前回残骸を消す）。
+        //   2. `disableCursorRects()` で AppKit の自動 cursor reset 機構を切る。これがないと
+        //      view update のたびに AppKit が cursor を arrow に戻し続け、`push` した
+        //      pointingHand/closedHand が一瞬で消える（Apple Dev Forums thread 708211 の症状）。
+        //   3. 以降、IconView 内の `push/pop` で cursor stack を直接管理。
+        // 順序を逆にすると arrow リセット前の cursor (I-beam 等) が固定されてしまう。
+        NSCursor.arrow.set()
+        popover.contentViewController?.view.window?.disableCursorRects()
         startOutsideClickMonitor()
     }
 
@@ -400,7 +417,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.popover.performClose(nil)
+                self?.dismissPopover(reason: "outside click")
             }
         }
     }
@@ -415,9 +432,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// 他アプリへのフォーカス移動で popover を閉じる。global monitor だけだと「Cmd+Tab」など
     /// マウス経由でないアプリ切替を拾えないため併用する。
     @objc private func handleOtherAppActivated(_ notification: Notification) {
-        guard popover.isShown else { return }
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
               app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+        dismissPopover(reason: "other app activated")
+    }
+
+    /// popover を閉じる唯一の入口。外クリック / 他アプリ activate / 将来追加される条件（⎋ キー等）すべてここを通す。
+    private func dismissPopover(reason: String) {
+        guard popover.isShown else { return }
+        NSLog("[Kura] dismiss popover: %@", reason)
         popover.performClose(nil)
     }
 }
