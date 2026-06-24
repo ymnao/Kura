@@ -31,9 +31,9 @@ final class AppNode {
 final class KuraViewController: NSViewController {
     private let gridView = IconGridView()
     private let scrollView = NSScrollView()
-    private let emptyLabel = NSTextField(labelWithString: "")
+    private let emptyLabel = makeCursorlessLabel("")
     private let bannerContainer = NSView()
-    private let bannerLabel = NSTextField(labelWithString: "⚠ アクセシビリティ未許可")
+    private let bannerLabel = makeCursorlessLabel("⚠ アクセシビリティ未許可")
     private let bannerButton = NSButton()
     private var bannerHeightConstraint: NSLayoutConstraint!
 
@@ -78,7 +78,7 @@ final class KuraViewController: NSViewController {
             height: Self.preferredPopoverHeight
         ))
 
-        let title = NSTextField(labelWithString: "蔵")
+        let title = makeCursorlessLabel("蔵")
         title.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
         title.alignment = .center
         title.translatesAutoresizingMaskIntoConstraints = false
@@ -519,6 +519,20 @@ final class IconView: NSView, NSDraggingSource {
         addCursorRect(bounds, cursor: .pointingHand)
     }
 
+    /// `addCursorRect` が AppKit に採用されない経路（popover の自動 I-beam 等）に対する補強。
+    /// `cursorUpdate(with:)` で明示的に `set()` することで、IconView 領域内では確実に pointingHand。
+    /// tracking area に `.cursorUpdate` を入れているので、mouse move で AppKit が呼んでくれる。
+    override func cursorUpdate(with event: NSEvent) {
+        NSCursor.pointingHand.set()
+    }
+
+    /// IconView が window に attach された時点で `resetCursorRects` を確実に呼ばせる。
+    /// popover の中では cursor rect の自動再評価が走らないケースがあるため。
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.invalidateCursorRects(for: self)
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         installTrackingArea()
@@ -526,14 +540,15 @@ final class IconView: NSView, NSDraggingSource {
 
     /// init からも `updateTrackingAreas` 経由でも呼ぶ。`updateTrackingAreas` の初回呼び出しが
     /// popover 内で必ずしも走らないため、init で確実に installation する。
-    /// hover ハイライト用に `.mouseEnteredAndExited` のみ。cursor は `resetCursorRects` の経路に任せる。
+    /// hover ハイライト用に `.mouseEnteredAndExited`、cursor 補強用に `.cursorUpdate` を入れる。
+    /// `.cursorUpdate` は `cursorUpdate(with:)` の trigger 元。
     private func installTrackingArea() {
         if let existing = trackingArea {
             removeTrackingArea(existing)
         }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+            options: [.activeAlways, .mouseEnteredAndExited, .cursorUpdate, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -838,4 +853,52 @@ final class IconGridView: NSView {
         let flat = rowIndex * KuraViewController.columns + colIndex
         return min(flat, icons.count)
     }
+}
+
+// MARK: - CursorlessLabel
+
+/// AppKit のテキスト系 view (NSTextField) は I-beam を **複数経路** で登録する:
+///   1. `NSView.resetCursorRects()` (legacy cursor rect)
+///   2. `NSCell.resetCursorRect(_:inView:)` (cell-based legacy cursor rect)
+///   3. `NSTrackingArea` 経由の `cursorUpdate` (modern)
+/// それぞれ独立に動くため、全部塞がないと I-beam が出る。CursorlessLabel は全経路の override を持つ。
+///
+/// レイアウト挙動を壊さないため、`NSTextField(labelWithString:)` で正規ラベルを作ったあと、
+/// view と cell を `object_setClass` で動的に差し替える方式を採る（どちらも stored property を追加
+/// していないので安全）。
+private final class CursorlessLabel: NSTextField {
+    override func resetCursorRects() {
+        // 経路 1 を抑止: view レベルの legacy cursor rect 登録なし。
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        // 経路 3 を抑止: AppKit が NSTextField のために追加した cursor update tracking area を全削除。
+        // super を呼んだ直後に消すことで、AppKit が登録したものを確実に除去できる。
+        for area in trackingAreas {
+            removeTrackingArea(area)
+        }
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        // tracking area を全削除しても、cursorUpdate event が何かの経路で届いた場合の最終防壁。
+        // NSCursor.IBeam.set() が default なので、override で何もしないことで I-beam を上書きしない。
+    }
+}
+
+/// NSTextFieldCell から I-beam の cursor rect が登録される経路を塞ぐ。
+private final class CursorlessLabelCell: NSTextFieldCell {
+    override func resetCursorRect(_ cellFrame: NSRect, in controlView: NSView) {
+        // 経路 2 を抑止: cell レベルの legacy cursor rect 登録なし。
+    }
+}
+
+/// `NSTextField.labelWithString(_:)` の挙動をそのままに、view + cell の cursor rect 登録を抑止した label を返す。
+private func makeCursorlessLabel(_ string: String) -> NSTextField {
+    let label = NSTextField(labelWithString: string)
+    object_setClass(label, CursorlessLabel.self)
+    if let cell = label.cell {
+        object_setClass(cell, CursorlessLabelCell.self)
+    }
+    return label
 }
