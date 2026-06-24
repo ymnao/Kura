@@ -303,9 +303,10 @@ extension KuraViewController {
             guard let self = self else { return }
             // scan task の完了を待つ。途中で別の scan が kick されたら（setTargets で世代更新）
             // 再 lookup して新しい task を待つ。最大 3 回までで諦める（無限ループ防止）。
+            // node の取り直しは `nodeCache[bundleId]` で O(1)（`setTargets` で appNodes と同期更新されている）。
             for _ in 0..<3 {
                 guard self.pendingMenuRequestID == requestID,
-                      let node = self.appNodes.first(where: { $0.app.bundleIdentifier == bundleId })
+                      let node = self.nodeCache[bundleId]
                 else { return }
                 self.scanIfNeeded(node)
                 if let task = node.scanTask {
@@ -319,7 +320,7 @@ extension KuraViewController {
             // → 表示しない。`result != nil` && `scanTask == nil` で「読込中…だけの menu」を回避
             // (loop 後も未完了なら表示しない、次回クリックでリトライ)。
             guard self.pendingMenuRequestID == requestID,
-                  let node = self.appNodes.first(where: { $0.app.bundleIdentifier == bundleId }),
+                  let node = self.nodeCache[bundleId],
                   node.scanTask == nil,
                   node.result != nil,
                   let currentView = self.gridView.iconView(forBundleId: bundleId),
