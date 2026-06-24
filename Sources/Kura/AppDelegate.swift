@@ -2,7 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
+final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopoverDelegate {
     /// 蔵本体（左クリックでポップオーバー、右クリックでメニュー）
     private var statusItem: NSStatusItem!
     /// セパレータ（折りたたみ時に length 膨張、蔵の左に置かれる前提）
@@ -28,6 +28,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
     /// 折りたたみコミット待ち中フラグ。true の間は新規 scan kick を抑止し、
     /// 「待っている scan task が完了直後に別の scan に差し替わって commitFold が cache 未確定で走る」競合を防ぐ。
     private var isCommittingFold: Bool = false
+
+    /// popover を開いている間だけ生きる、他アプリでのマウス押下監視。
+    /// `popover.behavior = .applicationDefined` にしているため自動 close は走らない。
+    /// 外クリックでの close は本 monitor が担当する（NSDraggingSession 後も transient 動作が
+    /// 壊れない、というのが手動制御を選んだ理由）。
+    private var outsideClickMonitor: Any?
 
     private static let expandedSeparatorLength: CGFloat = 8
     /// 折りたたみ length は「現在繋がっている全画面の最大幅」で十分。
@@ -59,6 +65,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
             self,
             selector: #selector(handleScreenParametersChanged),
             name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleOtherAppActivated(_:)),
+            name: NSWorkspace.didActivateApplicationNotification,
             object: nil
         )
         // warmup scan を複数タイミングで kick。
@@ -123,11 +135,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
 
     private func setupPopover() {
         popover = NSPopover()
-        popover.contentSize = NSSize(width: 320, height: 420)
-        popover.behavior = .transient
+        // 4 列グリッドの幅に合わせる。高さは AppKit が VC の intrinsic size から決める。
+        popover.contentSize = NSSize(
+            width: KuraViewController.preferredPopoverWidth,
+            height: KuraViewController.preferredPopoverHeight
+        )
+        // `.transient` は内部で NSDraggingSession を回すと壊れるケースがあるため避ける（D&D 後に
+        // 他アプリへフォーカスを移しても close が走らなくなる）。手動 close 制御に切り替え:
+        //   - 蔵アイコン再クリック → togglePopover で close（既存）
+        //   - 外クリック → outsideClickMonitor で close
+        //   - 他アプリ activate → handleOtherAppActivated で close
+        //   - メニュー項目発火 → onItemActivated で close
+        popover.behavior = .applicationDefined
+        popover.delegate = self
         let vc = KuraViewController()
         vc.onItemActivated = { [weak self] in
-            self?.popover.performClose(nil)
+            self?.dismissPopover(reason: "menu item activated")
         }
         vc.onReorder = { [weak self] orderedBundleIds in
             guard let self = self else { return }
@@ -259,6 +282,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
     }
 
     private func showContextMenu(from button: NSStatusBarButton) {
+        // popover を開いた状態で右クリックすると、`.applicationDefined` なので自動 close が走らず
+        // popover とコンテキストメニューが同時に残り、その先で「折りたたむ」を選ぶと折りたたみ後も
+        // popover が居座る。先に明示的に閉じておく。
+        dismissPopover(reason: "context menu")
+
         // メニュー操作（数百 ms ある）の裏で scan を kick。
         // 「ポップオーバーを開かずに折りたたみ」の場合でも、cache 最新化を間に合わせる狙い。
         startScan()
@@ -360,5 +388,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController {
 
     @objc private func quit(_ sender: Any?) {
         NSApp.terminate(nil)
+    }
+
+    // MARK: - 手動 close 制御（NSPopoverDelegate + 外クリック / 他アプリ activate 監視）
+
+    func popoverDidShow(_ notification: Notification) {
+        startOutsideClickMonitor()
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        stopOutsideClickMonitor()
+    }
+
+    private func startOutsideClickMonitor() {
+        guard outsideClickMonitor == nil else { return }
+        // global monitor は他アプリで発生したマウス押下のみ受け取る（自アプリの popover 内クリックは
+        // 通常通り popover の view に届く）。popover 外のどこをクリックしても close するシンプルな挙動。
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.dismissPopover(reason: "outside click")
+            }
+        }
+    }
+
+    private func stopOutsideClickMonitor() {
+        if let monitor = outsideClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            outsideClickMonitor = nil
+        }
+    }
+
+    /// 他アプリへのフォーカス移動で popover を閉じる。global monitor だけだと「Cmd+Tab」など
+    /// マウス経由でないアプリ切替を拾えないため併用する。
+    @objc private func handleOtherAppActivated(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+        dismissPopover(reason: "other app activated")
+    }
+
+    /// popover を閉じる唯一の入口。外クリック / 他アプリ activate / 将来追加される条件（⎋ キー等）すべてここを通す。
+    private func dismissPopover(reason: String) {
+        guard popover.isShown else { return }
+        NSLog("[Kura] dismiss popover: %@", reason)
+        popover.performClose(nil)
     }
 }
