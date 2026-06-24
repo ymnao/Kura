@@ -60,6 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         NSLog("[Kura] launch: AXIsProcessTrusted=\(AccessibilityPermission.requestIfNeeded())")
         setupStatusItem()
         setupSeparatorItem()
+        // 蔵アイコンの初期描画は両 setup 完了後に呼ぶ。
+        // `updateStatusIcon` は `isFolded` → `separatorItem.length` を参照するため、
+        // `setupStatusItem` 内で呼ぶと separatorItem (IUO) がまだ nil でクラッシュする。
+        updateStatusIcon()
         setupPopover()
         setupHotKey()
         NotificationCenter.default.addObserver(
@@ -94,7 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         button.target = self
         button.action = #selector(statusItemClicked(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        updateStatusIcon()
+        // updateStatusIcon() は applicationDidFinishLaunching で setupSeparatorItem 後に呼ぶ
     }
 
     /// 蔵アイコンの SF Symbol を現在の fold 状態に合わせて差し替える。
@@ -102,17 +106,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// 展開中:       `archivebox`（開いている／覗ける印象）
     /// `separatorItem.length` を変更した**後**に呼ぶこと（`isFolded` は length で判定するため）。
     /// 将来 v0.7 の環境設定 UI で symbol 名をユーザーが選べるようにする予定。
+    /// SF Symbol load 失敗時は「蔵」テキストにフォールバック（最低限の視認性を保つ）。
     private func updateStatusIcon() {
         guard let button = statusItem.button else { return }
         let folded = isFolded
         let symbolName = folded ? "archivebox.fill" : "archivebox"
-        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
-        let image = NSImage(
-            systemSymbolName: symbolName,
-            accessibilityDescription: folded ? "蔵 (折りたたみ中)" : "蔵 (展開中)"
-        )?.withSymbolConfiguration(config)
-        image?.isTemplate = true
-        button.image = image
+        let description = folded ? "蔵 (折りたたみ中)" : "蔵 (展開中)"
+        if let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: description) {
+            let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+            let configured = symbol.withSymbolConfiguration(config) ?? symbol
+            configured.isTemplate = true
+            button.imagePosition = .imageOnly
+            button.image = configured
+            NSLog("[Kura] updateStatusIcon: %@ size=%.0fx%.0f",
+                  symbolName, configured.size.width, configured.size.height)
+        } else {
+            NSLog("[Kura] updateStatusIcon: symbol %@ NOT FOUND — fallback to text", symbolName)
+            button.image = nil
+            button.imagePosition = .noImage
+            button.title = "蔵"
+            button.font = NSFont.systemFont(ofSize: 14, weight: .medium)
+        }
     }
 
     private func setupSeparatorItem() {
