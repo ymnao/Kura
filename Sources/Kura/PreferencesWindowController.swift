@@ -22,7 +22,7 @@ final class PreferencesWindowController: NSWindowController {
         window.center()
         self.init(window: window)
         buildContent()
-        reloadFromStore()
+        // 初期値の流し込みは showWindow が必ず呼ぶ reloadFromStore に任せる（ここで呼ぶと二重）。
     }
 
     private func buildContent() {
@@ -73,8 +73,8 @@ final class PreferencesWindowController: NSWindowController {
     /// `.kuraPreferencesDidChange` 経由で他ウィンドウから変更される想定は今のところないが、
     /// SMAppService の状態がシステム側で変わる (ユーザーがシステム設定で外す等) ケースに備える。
     private func reloadFromStore() {
-        let currentSymbol = PreferencesStore.symbol
-        if let idx = KuraSymbol.allCases.firstIndex(of: currentSymbol) {
+        let idx = symbolPopUp.indexOfItem(withRepresentedObject: PreferencesStore.symbol)
+        if idx >= 0 {
             symbolPopUp.selectItem(at: idx)
         }
         foldOnLaunchCheckbox.state = PreferencesStore.foldOnLaunch ? .on : .off
@@ -93,8 +93,8 @@ final class PreferencesWindowController: NSWindowController {
     @objc private func launchAtLoginChanged(_ sender: NSButton) {
         PreferencesStore.launchAtLogin = (sender.state == .on)
         // SMAppService.register/unregister が失敗してもチェックボックスの見た目が先に変わってしまうため、
-        // store の真値で UI を再同期する (失敗時はチェックが元に戻る)。
-        sender.state = PreferencesStore.launchAtLogin ? .on : .off
+        // store の真値で UI を全部再同期する (失敗時はチェックが元に戻る)。
+        reloadFromStore()
     }
 
     override func showWindow(_ sender: Any?) {

@@ -29,10 +29,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// 「待っている scan task が完了直後に別の scan に差し替わって commitFold が cache 未確定で走る」競合を防ぐ。
     private var isCommittingFold: Bool = false
 
-    /// 起動時 fold (`PreferencesStore.foldOnLaunch`) 待ちフラグ。
-    /// 初回 warmup scan が成功した時点で消化する。一度だけ消費して以降は false。
-    private var pendingFoldOnLaunch: Bool = false
-
     /// 環境設定ウィンドウ。右クリックメニュー「環境設定…」から開かれた際に 1 インスタンスのみ生成し、
     /// 以降は再 show するだけ。閉じても release されないので state も保持される (`isReleasedWhenClosed = false`)。
     private var preferencesWindowController: PreferencesWindowController?
@@ -60,6 +56,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// fold/expand 時 (高頻度) は cache を read するだけ、symbol 変更時 (低頻度) のみ build しなおす。
     private var expandedIcon: NSImage?
     private var foldedIcon: NSImage?
+    /// 現在 cache 中の symbol。設定変更通知時に同じ symbol なら再 build を skip する判定に使う。
+    private var lastBuiltSymbol: KuraSymbol?
 
     /// FoldController 実装。cache 不完全な項目クリック時の選択的自動展開で使われる。
     func expandIfFolded() {
@@ -77,7 +75,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("[Kura] launch: AXIsProcessTrusted=\(AccessibilityPermission.requestIfNeeded())")
-        pendingFoldOnLaunch = PreferencesStore.foldOnLaunch
         rebuildIconCache()
         setupStatusItem()
         setupSeparatorItem()
@@ -131,10 +128,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// 蔵アイコン用 SF Symbol を現在の `PreferencesStore.symbol` から build して cache に積む。
     /// 起動時 (`applicationDidFinishLaunching`) と設定変更時 (`handlePreferencesDidChange`) に呼ぶ。
     /// fold/expand 自体は高頻度に走るため、`updateStatusIcon()` 内では cache を read するだけ。
-    private func rebuildIconCache() {
+    /// 同じ symbol で既に build 済みなら何もせず `false` を返す（foldOnLaunch / launchAtLogin 変更時の
+    /// 無駄な NSImage 再生成を抑止）。
+    @discardableResult
+    private func rebuildIconCache() -> Bool {
         let symbol = PreferencesStore.symbol
+        guard symbol != lastBuiltSymbol else { return false }
+        lastBuiltSymbol = symbol
         expandedIcon = Self.makeKuraIcon(systemName: symbol.expandedSymbolName, description: "蔵 (展開中)")
         foldedIcon   = Self.makeKuraIcon(systemName: symbol.foldedSymbolName,   description: "蔵 (折りたたみ中)")
+        return true
     }
 
     private static func makeKuraIcon(systemName: String, description: String) -> NSImage? {
@@ -166,17 +169,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     }
 
     @objc private func handlePreferencesDidChange() {
-        rebuildIconCache()
-        updateStatusIcon()
+        if rebuildIconCache() {
+            updateStatusIcon()
+        }
     }
 
-    /// 起動時 fold 待ちが残っていれば、初回 warmup scan 成功直後に消化する。
+    /// 起動時 fold (`PreferencesStore.foldOnLaunch`) を、初回 warmup scan 成功直後に消化する。
+    /// 呼び出し側 (`applyScanResult`) が「初回 true 遷移時のみ」呼ぶことを保証する。
     /// - セパレータが蔵の左にないと折りたためないため、その場合は静かに諦める（次回起動でリトライ）。
     /// - 既に手動展開／折りたたみ中なら何もしない（ユーザー操作を優先）。
     /// - toggleFold 経由で detail scan 待ちも含めた既存の安全確認を通す。
-    private func consumePendingFoldOnLaunchIfNeeded() {
-        guard pendingFoldOnLaunch else { return }
-        pendingFoldOnLaunch = false
+    private func consumeFoldOnLaunchIfNeeded() {
+        guard PreferencesStore.foldOnLaunch else { return }
         guard !isFolded, isSeparatorOnLeftOfMain else {
             NSLog("[Kura] foldOnLaunch skipped (folded=%@ leftOfMain=%@)",
                   isFolded ? "true" : "false",
@@ -331,8 +335,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
             // 一時失敗が残っている間は warmup を停止しない（起動直後の AX 不安定状態で
             // キャッシュ未確立のまま打ち切るのを防ぐ）。
             if failedBundleIds.isEmpty {
+                let isFirstAuthorizedSuccess = !didCompleteAuthorizedScan
                 didCompleteAuthorizedScan = true
-                consumePendingFoldOnLaunchIfNeeded()
+                if isFirstAuthorizedSuccess {
+                    consumeFoldOnLaunchIfNeeded()
+                }
             }
             summary = "items(\(apps.count) failed=\(failedBundleIds.count) preserved=\(preservedFromCache.count))"
         }

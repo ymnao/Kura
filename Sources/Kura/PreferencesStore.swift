@@ -47,6 +47,7 @@ enum PreferencesStore {
             return KuraSymbol(rawValue: raw) ?? .archivebox
         }
         set {
+            guard newValue != symbol else { return }
             UserDefaults.standard.set(newValue.rawValue, forKey: Keys.symbolName)
             NotificationCenter.default.post(name: .kuraPreferencesDidChange, object: nil)
         }
@@ -56,6 +57,7 @@ enum PreferencesStore {
     static var foldOnLaunch: Bool {
         get { UserDefaults.standard.bool(forKey: Keys.foldOnLaunch) }
         set {
+            guard newValue != foldOnLaunch else { return }
             UserDefaults.standard.set(newValue, forKey: Keys.foldOnLaunch)
             NotificationCenter.default.post(name: .kuraPreferencesDidChange, object: nil)
         }
@@ -67,6 +69,7 @@ enum PreferencesStore {
     static var launchAtLogin: Bool {
         get { SMAppService.mainApp.status == .enabled }
         set {
+            guard newValue != launchAtLogin else { return }
             do {
                 if newValue {
                     try SMAppService.mainApp.register()
