@@ -14,7 +14,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
 
     /// 蔵対象アプリの単一データソース。AppDelegate がスキャンの責任を持ち、
     /// 折りたたみ中も展開中も同じキャッシュを表示することで一貫性を保つ。
+    /// **除外設定 (`AppExclusionStore`) を適用する前**の生スキャン結果を保持する。
+    /// 除外解除 UX (環境設定の「対象アプリ」タブ) のため除外アプリも残し、
+    /// VC への `setTargets` 直前に `visibleApps` 経由で除外を適用する。
     private var lastScanResult: [StatusBarApp] = []
+
+    /// `lastScanResult` から除外設定を適用した popover 表示対象。
+    /// AppOrderStore.applied → AppExclusionStore.filtered の順で適用される
+    /// (lastScanResult が AppOrderStore.applied 済みなので、ここでは filter だけ)。
+    private var visibleApps: [StatusBarApp] {
+        AppExclusionStore.filtered(lastScanResult)
+    }
     private var scanTask: Task<Void, Never>?
     /// 古い scan 完了が新しい結果を上書きしないよう世代管理する。
     /// startScan で +1、applyScanResult で世代一致のみ反映。
@@ -184,6 +194,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         // フォールバック状態 (SF Symbol load 失敗) から復帰できるよう、symbol 不変でも updateStatusIcon を呼ぶ。
         // updateStatusIcon は cache を read するだけなので低コスト。
         updateStatusIcon()
+        // 除外リスト (`AppExclusionStore`) 変更時に popover の表示を再フィルタで更新する。
+        // 環境設定ウィンドウから除外切り替え時、popover が開いていれば即時反映。
+        // 通常は環境設定がフォアグラウンドで popover は閉じているが、念のための復帰経路。
+        // scan は走らせない (除外切り替えに AX 走査は不要)。
+        if !isFolded, popover.isShown, let vc = popover.contentViewController as? KuraViewController {
+            vc.setTargets(visibleApps)
+        }
     }
 
     /// 起動時 fold (`pendingFoldOnLaunch` snapshot) を、初回 warmup scan 成功直後に消化する。
@@ -359,7 +376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         // 次回ポップオーバー表示時に最新 cache が表示され、各 AppNode のメニュー詳細も
         // setTargets 内で事前 scan される（折りたたみ後の AX 制限を避ける目的）。
         if !isFolded, let vc = popover.contentViewController as? KuraViewController {
-            vc.setTargets(lastScanResult)
+            vc.setTargets(visibleApps)
         }
     }
 
@@ -379,8 +396,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
             if let vc = popover.contentViewController as? KuraViewController {
-                // 折りたたみ中も展開中も lastScanResult を直接表示。
-                vc.setTargets(lastScanResult)
+                // 折りたたみ中も展開中も visibleApps (除外適用後) を表示。
+                vc.setTargets(visibleApps)
                 // 展開中だけ裏で scan を更新（ポップオーバー閉じる→開くで最新化）
                 // startScan 内部で座標未取得時の guard があるため、ここでは無条件呼び出しでよい。
                 if !isFolded {
@@ -519,6 +536,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         if preferencesWindowController == nil {
             preferencesWindowController = PreferencesWindowController()
         }
+        // 「対象アプリ」タブが scan 結果から行を構築するため、開く度に snapshot を渡す。
+        // ウィンドウ表示中の scan 更新はここでは反映しない (環境設定を閉じて開き直しで最新化)。
+        // リアルタイム更新は table の行追加/削除アニメーションが絡んで複雑なので MVP では避ける。
+        preferencesWindowController?.setScanResult(lastScanResult)
         preferencesWindowController?.showWindow(nil)
     }
 
