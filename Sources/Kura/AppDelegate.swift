@@ -29,6 +29,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// 「待っている scan task が完了直後に別の scan に差し替わって commitFold が cache 未確定で走る」競合を防ぐ。
     private var isCommittingFold: Bool = false
 
+    /// 起動時 fold (`PreferencesStore.foldOnLaunch`) 待ちフラグ。
+    /// applicationDidFinishLaunching で snapshot し、初回 warmup scan 成功時に消化する。
+    /// snapshot にしてあるのは、起動から warmup 完了までの間に環境設定で値を変えられても
+    /// 「起動時の意図」を尊重するため (live read だと race して意図しない fold が走る)。
+    private var pendingFoldOnLaunch: Bool = false
+
     /// 環境設定ウィンドウ。右クリックメニュー「環境設定…」から開かれた際に 1 インスタンスのみ生成し、
     /// 以降は再 show するだけ。閉じても release されないので state も保持される (`isReleasedWhenClosed = false`)。
     private var preferencesWindowController: PreferencesWindowController?
@@ -75,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("[Kura] launch: AXIsProcessTrusted=\(AccessibilityPermission.requestIfNeeded())")
+        pendingFoldOnLaunch = PreferencesStore.foldOnLaunch
         rebuildIconCache()
         setupStatusItem()
         setupSeparatorItem()
@@ -128,16 +135,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// 蔵アイコン用 SF Symbol を現在の `PreferencesStore.symbol` から build して cache に積む。
     /// 起動時 (`applicationDidFinishLaunching`) と設定変更時 (`handlePreferencesDidChange`) に呼ぶ。
     /// fold/expand 自体は高頻度に走るため、`updateStatusIcon()` 内では cache を read するだけ。
-    /// 同じ symbol で既に build 済みなら何もせず `false` を返す（foldOnLaunch / launchAtLogin 変更時の
+    /// 同じ symbol で既に build 済みなら何もせず skip（foldOnLaunch / launchAtLogin 変更時の
     /// 無駄な NSImage 再生成を抑止）。
-    @discardableResult
-    private func rebuildIconCache() -> Bool {
+    /// SF Symbol が両方 load 失敗した場合は `lastBuiltSymbol` を update せず、
+    /// 後の設定変更通知で再試行可能な状態に保つ（フォールバック状態に永続的に閉じ込められないため）。
+    private func rebuildIconCache() {
         let symbol = PreferencesStore.symbol
-        guard symbol != lastBuiltSymbol else { return false }
-        lastBuiltSymbol = symbol
-        expandedIcon = Self.makeKuraIcon(systemName: symbol.expandedSymbolName, description: "蔵 (展開中)")
-        foldedIcon   = Self.makeKuraIcon(systemName: symbol.foldedSymbolName,   description: "蔵 (折りたたみ中)")
-        return true
+        guard symbol != lastBuiltSymbol else { return }
+        let expanded = Self.makeKuraIcon(systemName: symbol.expandedSymbolName, description: "蔵 (展開中)")
+        let folded   = Self.makeKuraIcon(systemName: symbol.foldedSymbolName,   description: "蔵 (折りたたみ中)")
+        expandedIcon = expanded
+        foldedIcon   = folded
+        if expanded != nil || folded != nil {
+            lastBuiltSymbol = symbol
+        }
     }
 
     private static func makeKuraIcon(systemName: String, description: String) -> NSImage? {
@@ -169,25 +180,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     }
 
     @objc private func handlePreferencesDidChange() {
-        if rebuildIconCache() {
-            updateStatusIcon()
-        }
+        rebuildIconCache()
+        // フォールバック状態 (SF Symbol load 失敗) から復帰できるよう、symbol 不変でも updateStatusIcon を呼ぶ。
+        // updateStatusIcon は cache を read するだけなので低コスト。
+        updateStatusIcon()
     }
 
-    /// 起動時 fold (`PreferencesStore.foldOnLaunch`) を、初回 warmup scan 成功直後に消化する。
+    /// 起動時 fold (`pendingFoldOnLaunch` snapshot) を、初回 warmup scan 成功直後に消化する。
     /// 呼び出し側 (`applyScanResult`) が「初回 true 遷移時のみ」呼ぶことを保証する。
     /// - セパレータが蔵の左にないと折りたためないため、その場合は静かに諦める（次回起動でリトライ）。
     /// - 既に手動展開／折りたたみ中なら何もしない（ユーザー操作を優先）。
-    /// - toggleFold 経由で detail scan 待ちも含めた既存の安全確認を通す。
+    /// - performToggleFold(silent:) 経由: detail scan 失敗時に alert を出さない (起動直後の modal を回避)。
     private func consumeFoldOnLaunchIfNeeded() {
-        guard PreferencesStore.foldOnLaunch else { return }
+        guard pendingFoldOnLaunch else { return }
+        pendingFoldOnLaunch = false
         guard !isFolded, isSeparatorOnLeftOfMain else {
-            NSLog("[Kura] foldOnLaunch skipped (folded=%@ leftOfMain=%@)",
-                  isFolded ? "true" : "false",
-                  isSeparatorOnLeftOfMain ? "true" : "false")
+            NSLog("[Kura] foldOnLaunch skipped (folded=\(isFolded) leftOfMain=\(isSeparatorOnLeftOfMain))")
             return
         }
-        toggleFold(nil)
+        performToggleFold(silent: true)
     }
 
     private func setupSeparatorItem() {
@@ -402,13 +413,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
 
         menu.addItem(.separator())
 
-        let prefsItem = NSMenuItem(title: "環境設定…", action: #selector(showPreferences(_:)), keyEquivalent: ",")
+        // accessory app は mainMenu を持たないため、⌘, / ⌘Q をグローバルショートカットとして
+        // 登録できない。keyEquivalent を表示すると「どこからでも使える」とユーザーを誤誘導するため空に。
+        // menu 表示中のキーボード操作は矢印キー + Enter で行える。
+        let prefsItem = NSMenuItem(title: "環境設定…", action: #selector(showPreferences(_:)), keyEquivalent: "")
         prefsItem.target = self
         menu.addItem(prefsItem)
 
         menu.addItem(.separator())
 
-        let quitItem = NSMenuItem(title: "Kura を終了", action: #selector(quit(_:)), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Kura を終了", action: #selector(quit(_:)), keyEquivalent: "")
         quitItem.target = self
         menu.addItem(quitItem)
 
@@ -416,7 +430,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
     }
 
+    /// ユーザー操作 (右クリックメニュー / ホットキー) からの折りたたみトグル。
+    /// 失敗時には alert を出してユーザーに状況を伝える。
     @objc private func toggleFold(_ sender: Any?) {
+        performToggleFold(silent: false)
+    }
+
+    /// `toggleFold` の本体。`silent: true` を渡すと folded 失敗時の alert を出さない。
+    /// 起動時 fold (`consumeFoldOnLaunchIfNeeded`) からは silent で呼ぶ
+    /// (ユーザー操作起点ではないため、起動直後に modal alert を出すと UX 不快)。
+    private func performToggleFold(silent: Bool) {
         if isFolded {
             setSeparatorLength(Self.expandedSeparatorLength)
             return
@@ -455,7 +478,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
                 layoutOk = false
             }
             guard layoutOk, detailScansOk else {
-                self.showFoldUnavailableAlert(layoutOk: layoutOk, detailOk: detailScansOk)
+                if !silent {
+                    self.showFoldUnavailableAlert(layoutOk: layoutOk, detailOk: detailScansOk)
+                }
                 return
             }
             self.commitFold()

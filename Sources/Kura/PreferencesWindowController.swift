@@ -10,9 +10,11 @@ final class PreferencesWindowController: NSWindowController {
     private var launchAtLoginCheckbox: NSButton!
 
     convenience init() {
+        // `.miniaturizable` を含めない: accessory app は Dock アイコンを持たないため、
+        // 一度 minimize すると window を復帰させる経路 (Dock クリック等) がなく詰むため。
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 380, height: 180),
-            styleMask: [.titled, .closable, .miniaturizable],
+            styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
@@ -22,18 +24,26 @@ final class PreferencesWindowController: NSWindowController {
         window.center()
         self.init(window: window)
         buildContent()
-        // 初期値の流し込みは showWindow が必ず呼ぶ reloadFromStore に任せる（ここで呼ぶと二重）。
+        // showWindow を経由しない経路 (NSWindow restoration 等) でも UI が初期値で残らないよう、
+        // ここでも初期値を流し込む。showWindow も冒頭で reloadFromStore を呼ぶが idempotent。
+        reloadFromStore()
     }
 
     private func buildContent() {
-        guard let contentView = window?.contentView else { return }
+        // NSWindow(contentRect:...) で生成した window の contentView は AppKit が必ず作るため
+        // force unwrap で OK。defensive な guard は IUO 未代入による後続クラッシュを隠してしまう。
+        let contentView = window!.contentView!
 
         let symbolLabel = NSTextField(labelWithString: "蔵アイコン:")
 
         let popUp = NSPopUpButton()
+        // addItem(withTitle:) は重複タイトルがあると既存項目を再利用するため、representedObject を
+        // lastItem? に置く方式だと将来 displayName が衝突したときに silent footgun を生む。
+        // NSMenuItem を直接生成して menu に add することで重複を許容する。
         for symbol in KuraSymbol.allCases {
-            popUp.addItem(withTitle: symbol.displayName)
-            popUp.lastItem?.representedObject = symbol
+            let item = NSMenuItem(title: symbol.displayName, action: nil, keyEquivalent: "")
+            item.representedObject = symbol
+            popUp.menu?.addItem(item)
         }
         popUp.target = self
         popUp.action = #selector(symbolChanged(_:))
