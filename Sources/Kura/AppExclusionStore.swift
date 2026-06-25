@@ -16,13 +16,13 @@ enum AppExclusionStore {
     }
 
     /// 除外集合をまるごと保存する。
-    /// 同値 (sorted Array で比較) なら post を skip し、無駄な再 filter / 通知を抑止する。
-    /// 並び順を sorted して保存することで、UserDefaults の plist diff も安定する。
+    /// 同値なら post を skip し、無駄な再 filter / 通知を抑止する。
+    /// 同値判定は Set で行い (要素順非依存)、UserDefaults への書き込み時のみ sorted Array に
+    /// 変換することで plist diff も安定させる。
     static func save(_ excluded: Set<String>) {
-        let sorted = excluded.sorted()
-        let current = (UserDefaults.standard.stringArray(forKey: key) ?? []).sorted()
-        guard sorted != current else { return }
-        UserDefaults.standard.set(sorted, forKey: key)
+        let current = Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+        guard excluded != current else { return }
+        UserDefaults.standard.set(excluded.sorted(), forKey: key)
         NotificationCenter.default.post(name: .kuraPreferencesDidChange, object: nil)
     }
 

@@ -211,30 +211,31 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     }
 
     private func buildDisplayedApps(scanResult: [StatusBarApp]) -> [DisplayedApp] {
-        let excluded = AppExclusionStore.load()
-        var seen = Set<String>()
+        // excluded を mutable な「未消費」集合として扱い、scan で見つけたものから順に remove する。
+        // - remove の戻り値 (削除された element / nil) で「除外対象だったか」を bool 化して isExcluded に詰める
+        // - ループ後に残った要素 = 「除外済みだが scan に出ていない bundleId」= 末尾補完対象
+        // これにより seen Set + 2 度の Set 走査 (subtracting) を避ける。
+        var unseenExcluded = AppExclusionStore.load()
         var result: [DisplayedApp] = []
-        result.reserveCapacity(scanResult.count + excluded.count)
+        result.reserveCapacity(scanResult.count + unseenExcluded.count)
         for app in scanResult {
-            seen.insert(app.bundleIdentifier)
+            let wasExcluded = unseenExcluded.remove(app.bundleIdentifier) != nil
             result.append(DisplayedApp(
                 bundleId: app.bundleIdentifier,
                 name: app.name,
                 icon: app.icon,
-                isExcluded: excluded.contains(app.bundleIdentifier)
+                isExcluded: wasExcluded
             ))
         }
-        // 除外済みだが現在 scan に出ていない bundleId を末尾に補完。
-        // (アプリが起動していない or 蔵より右にいて scan 対象外、等)
+        // 残った unseenExcluded = アプリが起動していない or 蔵より右にいて scan 対象外、等。
         // 並び順を安定させるため sorted する (Set の列挙順は非決定的)。
-        for bundleId in excluded.subtracting(seen).sorted() {
-            let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId)
-            let icon = url.map { NSWorkspace.shared.icon(forFile: $0.path) }
-            let name = url.map { FileManager.default.displayName(atPath: $0.path) } ?? bundleId
+        // bundleId からの (icon, name) 逆引きは StatusBarApp.lookupInfo に集約済み。
+        for bundleId in unseenExcluded.sorted() {
+            let info = StatusBarApp.lookupInfo(bundleId: bundleId)
             result.append(DisplayedApp(
                 bundleId: bundleId,
-                name: name,
-                icon: icon,
+                name: info.name,
+                icon: info.icon,
                 isExcluded: true
             ))
         }
@@ -374,13 +375,10 @@ private final class AppRowView: NSTableCellView {
     func configure(with app: DisplayedApp) {
         currentBundleId = app.bundleId
         checkbox.state = app.isExcluded ? .off : .on
-        iconView.image = app.icon
-        nameLabel.stringValue = app.name
         // 起動していない除外アプリ等で icon が nil の場合は placeholder を出す (空白だと違和感がある)。
-        if iconView.image == nil {
-            iconView.image = NSImage(systemSymbolName: "questionmark.app.dashed",
-                                     accessibilityDescription: "未取得")
-        }
+        iconView.image = app.icon ?? NSImage(systemSymbolName: "questionmark.app.dashed",
+                                             accessibilityDescription: "未取得")
+        nameLabel.stringValue = app.name
     }
 
     @objc private func checkboxToggled(_ sender: NSButton) {
