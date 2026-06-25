@@ -29,6 +29,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// 「待っている scan task が完了直後に別の scan に差し替わって commitFold が cache 未確定で走る」競合を防ぐ。
     private var isCommittingFold: Bool = false
 
+    /// 起動時 fold (`PreferencesStore.foldOnLaunch`) 待ちフラグ。
+    /// 初回 warmup scan が成功した時点で消化する。一度だけ消費して以降は false。
+    private var pendingFoldOnLaunch: Bool = false
+
+    /// 環境設定ウィンドウ。右クリックメニュー「環境設定…」から開かれた際に 1 インスタンスのみ生成し、
+    /// 以降は再 show するだけ。閉じても release されないので state も保持される (`isReleasedWhenClosed = false`)。
+    private var preferencesWindowController: PreferencesWindowController?
+
     /// popover を開いている間だけ生きる、他アプリでのマウス押下監視。
     /// `popover.behavior = .applicationDefined` にしているため自動 close は走らない。
     /// 外クリックでの close は本 monitor が担当する（NSDraggingSession 後も transient 動作が
@@ -48,6 +56,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         separatorItem.length > Self.expandedSeparatorLength
     }
 
+    /// 蔵アイコン用 SF Symbol の cache。設定変更時に `rebuildIconCache()` で再生成する。
+    /// fold/expand 時 (高頻度) は cache を read するだけ、symbol 変更時 (低頻度) のみ build しなおす。
+    private var expandedIcon: NSImage?
+    private var foldedIcon: NSImage?
+
     /// FoldController 実装。cache 不完全な項目クリック時の選択的自動展開で使われる。
     func expandIfFolded() {
         if isFolded {
@@ -64,6 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("[Kura] launch: AXIsProcessTrusted=\(AccessibilityPermission.requestIfNeeded())")
+        pendingFoldOnLaunch = PreferencesStore.foldOnLaunch
+        rebuildIconCache()
         setupStatusItem()
         setupSeparatorItem()
         // 蔵アイコンの初期描画は両 setup 完了後に呼ぶ。
@@ -76,6 +91,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
             self,
             selector: #selector(handleScreenParametersChanged),
             name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePreferencesDidChange),
+            name: .kuraPreferencesDidChange,
             object: nil
         )
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -107,10 +128,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         // updateStatusIcon() 自体は applicationDidFinishLaunching で setupSeparatorItem 後に呼ぶ。
     }
 
-    /// 蔵アイコン用 SF Symbol を起動時に 1 度だけ build して保持する。
-    /// fold/expand のたびに NSImage と SymbolConfiguration を作り直すのを避ける。
-    private static let expandedIcon: NSImage? = makeKuraIcon(systemName: "archivebox", description: "蔵 (展開中)")
-    private static let foldedIcon: NSImage? = makeKuraIcon(systemName: "archivebox.fill", description: "蔵 (折りたたみ中)")
+    /// 蔵アイコン用 SF Symbol を現在の `PreferencesStore.symbol` から build して cache に積む。
+    /// 起動時 (`applicationDidFinishLaunching`) と設定変更時 (`handlePreferencesDidChange`) に呼ぶ。
+    /// fold/expand 自体は高頻度に走るため、`updateStatusIcon()` 内では cache を read するだけ。
+    private func rebuildIconCache() {
+        let symbol = PreferencesStore.symbol
+        expandedIcon = Self.makeKuraIcon(systemName: symbol.expandedSymbolName, description: "蔵 (展開中)")
+        foldedIcon   = Self.makeKuraIcon(systemName: symbol.foldedSymbolName,   description: "蔵 (折りたたみ中)")
+    }
 
     private static func makeKuraIcon(systemName: String, description: String) -> NSImage? {
         let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
@@ -121,14 +146,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     }
 
     /// 蔵アイコンを現在の fold 状態に合わせて差し替える。
-    /// 折りたたみ中: `archivebox.fill`（中に格納されている／閉じた印象）
-    /// 展開中:       `archivebox`（開いている／覗ける印象）
+    /// 折りたたみ中: `.fill` バリアント（中に格納されている／閉じた印象）
+    /// 展開中:       `.fill` なし（開いている／覗ける印象）
+    /// 具体的な symbol は `PreferencesStore.symbol` で決まる（v0.7 環境設定 UI で選択可能）。
     /// `separatorItem.length` を変更した**後**に呼ぶこと（`isFolded` は length で判定するため）。
-    /// 将来 v0.7 の環境設定 UI で symbol 名をユーザーが選べるようにする予定。
     /// SF Symbol load 失敗時は「蔵」テキストにフォールバック（最低限の視認性を保つ）。
     private func updateStatusIcon() {
         guard let button = statusItem.button else { return }
-        if let icon = isFolded ? Self.foldedIcon : Self.expandedIcon {
+        if let icon = isFolded ? foldedIcon : expandedIcon {
             button.imagePosition = .imageOnly
             button.image = icon
         } else {
@@ -138,6 +163,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
             button.title = "蔵"
             button.font = NSFont.systemFont(ofSize: 14, weight: .medium)
         }
+    }
+
+    @objc private func handlePreferencesDidChange() {
+        rebuildIconCache()
+        updateStatusIcon()
+    }
+
+    /// 起動時 fold 待ちが残っていれば、初回 warmup scan 成功直後に消化する。
+    /// - セパレータが蔵の左にないと折りたためないため、その場合は静かに諦める（次回起動でリトライ）。
+    /// - 既に手動展開／折りたたみ中なら何もしない（ユーザー操作を優先）。
+    /// - toggleFold 経由で detail scan 待ちも含めた既存の安全確認を通す。
+    private func consumePendingFoldOnLaunchIfNeeded() {
+        guard pendingFoldOnLaunch else { return }
+        pendingFoldOnLaunch = false
+        guard !isFolded, isSeparatorOnLeftOfMain else {
+            NSLog("[Kura] foldOnLaunch skipped (folded=%@ leftOfMain=%@)",
+                  isFolded ? "true" : "false",
+                  isSeparatorOnLeftOfMain ? "true" : "false")
+            return
+        }
+        toggleFold(nil)
     }
 
     private func setupSeparatorItem() {
@@ -286,6 +332,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
             // キャッシュ未確立のまま打ち切るのを防ぐ）。
             if failedBundleIds.isEmpty {
                 didCompleteAuthorizedScan = true
+                consumePendingFoldOnLaunchIfNeeded()
             }
             summary = "items(\(apps.count) failed=\(failedBundleIds.count) preserved=\(preservedFromCache.count))"
         }
@@ -345,6 +392,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
             foldItem.toolTip = "セパレータを蔵の左に ⌘+ドラッグしてから使ってください"
         }
         menu.addItem(foldItem)
+
+        menu.addItem(.separator())
+
+        let prefsItem = NSMenuItem(title: "環境設定…", action: #selector(showPreferences(_:)), keyEquivalent: ",")
+        prefsItem.target = self
+        menu.addItem(prefsItem)
 
         menu.addItem(.separator())
 
@@ -428,6 +481,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     private func commitFold() {
         setSeparatorLength(Self.collapsedSeparatorLength)
         NSLog("[Kura] commitFold sepLen=%.0f lastScanResult=%d", separatorItem.length, lastScanResult.count)
+    }
+
+    @objc private func showPreferences(_ sender: Any?) {
+        if preferencesWindowController == nil {
+            preferencesWindowController = PreferencesWindowController()
+        }
+        preferencesWindowController?.showWindow(nil)
     }
 
     @objc private func quit(_ sender: Any?) {
