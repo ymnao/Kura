@@ -72,7 +72,7 @@ Sources/Kura/
 
 代わりに Hidden Bar と同じ **2 NSStatusItem 方式** を採用:
 
-- **蔵本体** (`statusItem`): 通常 `variableLength`、常に右端側に表示。SF Symbol（展開中: 素のシンボル／折りたたみ中: `.fill` バリアント）で fold 状態を視覚化（`updateStatusIcon()` で差し替え。template image なのでメニューバー色に追従）。具体的なシンボルは `PreferencesStore.symbol` から読み出し（default `archivebox`、v0.7 環境設定 UI から `tray` / `shippingbox` / `square.stack` 等に変更可能）
+- **蔵本体** (`statusItem`): 通常 `variableLength`、常に右端側に表示。SF Symbol（展開中: 素のシンボル／折りたたみ中: `.fill` バリアント）で fold 状態を視覚化（`updateStatusIcon()` で差し替え。template image なのでメニューバー色に追従）。具体的なシンボルは `PreferencesStore.symbol` から読み出し（default `archivebox`、v0.7 環境設定 UI から `tray` / `shippingbox` / `square.stack` / `bubbles.and.sparkles`（カグラバチ・神薙モチーフ）に変更可能）
 - **セパレータ** (`separatorItem`): 通常 `length=8`（薄い縦線アイコン）。折りたたみ時 `length=max(500, min(screenWidth, 10000))` で膨張、左隣のアイコンを押し出す（画面幅相当で十分。`screenWidth*2` だと OS のメニューバー再レイアウトが重い）
 
 ```

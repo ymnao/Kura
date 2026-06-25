@@ -9,6 +9,8 @@ enum KuraSymbol: String, CaseIterable {
     case tray
     case shippingbox
     case squareStack = "square.stack"
+    /// カグラバチ（神薙）モチーフ。SF Symbols 5 (macOS 14+) で導入。
+    case bubbles = "bubbles.and.sparkles"
 
     var expandedSymbolName: String { rawValue }
     var foldedSymbolName: String { "\(rawValue).fill" }
@@ -19,6 +21,7 @@ enum KuraSymbol: String, CaseIterable {
         case .tray:        return "トレイ (tray)"
         case .shippingbox: return "ボックス (shippingbox)"
         case .squareStack: return "スタック (square.stack)"
+        case .bubbles:     return "泡 (bubbles)"
         }
     }
 }
