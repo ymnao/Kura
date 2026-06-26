@@ -75,6 +75,19 @@ final class HotKeyRecorderView: NSView {
         return super.resignFirstResponder()
     }
 
+    /// window から外されるタイミングで録音状態を強制的にクリアする。
+    /// AppKit は window close 時に必ず `resignFirstResponder` を呼ぶとは限らないため
+    /// (例えば accessory app で close せず orderOut した場合)、これがないと `isRecording=true` が
+    /// 残ったまま `PreferencesWindowController.reloadFromStore` の guard で永続的に sync が skip され、
+    /// 再 open 時に store の最新 hotKey が反映されなくなる。
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil {
+            isRecording = false
+            pendingRecordingActivation = false
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
         // クリックでだけ recording に突入させる印を立ててから firstResponder を要求する。
         // Tab navigation 経由の becomeFirstResponder ではこのフラグが立たないため即 recording にならない。
