@@ -34,10 +34,20 @@ struct StatusBarApp: Hashable, Sendable {
     }
 
     var icon: NSImage? {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
-            return nil
+        StatusBarApp.lookupInfo(bundleId: bundleIdentifier).icon
+    }
+
+    /// bundleId からアプリの表示用 (icon, name) を逆引きする。
+    /// scan に出てこないアプリ (起動していない、蔵より右に移動した除外済み等) の
+    /// 表示にも使えるよう static にする。インスタンスの `icon` も内部で本 helper を呼ぶ。
+    /// 取得不可なら icon=nil、name=bundleId をそのまま返す (caller 側で placeholder 切替)。
+    static func lookupInfo(bundleId: String) -> (icon: NSImage?, name: String) {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else {
+            return (nil, bundleId)
         }
-        return NSWorkspace.shared.icon(forFile: url.path)
+        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        let name = FileManager.default.displayName(atPath: url.path)
+        return (icon, name)
     }
 
     /// アプリ再起動で pid が変われば AX 要素も別物になるため、pid も同値判定に含める。
