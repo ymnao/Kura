@@ -125,6 +125,8 @@ enum PreferencesStore {
     /// getter: 3 つの key が揃って読めた場合のみその値、いずれかが欠けていたら `.default` (⌃⌥⌘K)。
     ///         keyCode == 0 (= 未設定や破損) も `.default` に倒す
     ///         (kVK_ANSI_A=0 とは別物。Carbon RegisterEventHotKey に 0 を渡すと未定義動作)。
+    ///         UserDefaults は Int で保存しているため、64bit プラットフォームでは UInt32 範囲外の値も
+    ///         入りうる。`UInt32(exactly:)` で truncation を防ぎ、範囲外なら `.default` に倒す。
     /// setter: 既存値と Equatable 比較し同値なら post を skip (foldOnLaunch / symbol と同じ流儀)。
     ///         3 つの key を atomic に書き換える保証はないが、UserDefaults は最終的に flush されるので
     ///         次回読み込み時には揃って入っている前提でよい。
@@ -137,13 +139,14 @@ enum PreferencesStore {
             guard let rawKeyCode = rawKeyCode,
                   let rawModifiers = rawModifiers,
                   let display = display,
-                  rawKeyCode > 0,
+                  let keyCode = UInt32(exactly: rawKeyCode), keyCode > 0,
+                  let modifiers = UInt32(exactly: rawModifiers),
                   !display.isEmpty else {
                 return .default
             }
             return KuraHotKey(
-                keyCode: UInt32(rawKeyCode),
-                modifiers: UInt32(rawModifiers),
+                keyCode: keyCode,
+                modifiers: modifiers,
                 display: display
             )
         }
