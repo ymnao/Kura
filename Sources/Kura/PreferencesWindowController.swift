@@ -136,7 +136,7 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
 
     private func buildAppsTab() -> NSView {
         let description = NSTextField(wrappingLabelWithString:
-            "蔵に格納するアプリを選んでください。チェックを外したアプリは蔵に入らず、メニューバーに残ります。")
+            "Kura のポップオーバーに表示するアプリを選んでください。チェックを外したアプリは Kura の管理対象から外れます。")
         description.font = .systemFont(ofSize: 11)
         description.textColor = .secondaryLabelColor
 

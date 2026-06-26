@@ -120,13 +120,13 @@ Sources/Kura/
 
 #### 除外リストによる policy 適用（v0.7 で追加）
 
-位置ベース選定の上に、**ユーザーが明示的に除外したアプリ** (`AppExclusionStore`) を popover から外す層を重ねる。Bartender 流の「常にメニューバーに残す」用途（時計の隣に置きたい音楽プレイヤー等）に対応する。
+位置ベース選定の上に、**ユーザーが明示的に除外したアプリ** (`AppExclusionStore`) を popover から外す層を重ねる。蔵より左に置いていても Kura の管理対象から外したいアプリ（時計の隣に置きたい音楽プレイヤー等）に対応する。
 
 - `MenuBarLayoutScanner` は事実だけを返す（蔵より左の NSStatusItem 保有アプリ）— scanner に policy を持たせない
 - `AppDelegate.applyScanResult` で `lastScanResult` には**除外前**の生 scan 結果を保存する（除外解除 UX のため除外済みアプリも保持しておく）
 - VC への `setTargets` 直前に `visibleApps` computed property 経由で `AppExclusionStore.filtered(_:)` を適用
 - 除外切り替えは UI 上でチェック操作 → `AppExclusionStore.setExcluded` → `.kuraPreferencesDidChange` post → `AppDelegate.handlePreferencesDidChange` が popover を再 setTargets（scan 再走は不要）
-- 除外されたアプリはメニューバーに残るが、Kura の管理外として扱われる。ユーザーが手動で蔵の左に置いていても popover には出さない。「常にメニューバーに残す」と「蔵対象から外す」を 1 つのチェックで表現する
+- 除外されたアプリは Kura の管理対象から外れ、popover には出さない。ただし蔵より左に置いている限り折りたたみ時は他と同じく画面外に押し出されるため、「常にメニューバーに残す」を保証したい場合はユーザーが ⌘+ドラッグで蔵より右に置く必要がある
 
 ### スキャンタイミング
 
