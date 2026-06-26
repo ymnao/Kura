@@ -1,4 +1,5 @@
 import Foundation
+import Carbon.HIToolbox
 import ServiceManagement
 
 /// 蔵のメニューバーアイコンに使う SF Symbol。
@@ -31,6 +32,25 @@ extension Notification.Name {
     static let kuraPreferencesDidChange = Notification.Name("kura.preferences.didChange")
 }
 
+/// 折りたたみ／展開トグルのグローバルホットキー設定。
+/// keyCode/modifiers は Carbon `RegisterEventHotKey` に直接渡せる形式で保持し、
+/// display は UI 再表示用に「⌃⌥⌘K」のような文字列を予め組み立てて保存する
+/// （keyboard layout 変更時の再計算を避け、保存時点で確定させる方針）。
+struct KuraHotKey: Equatable {
+    let keyCode: UInt32
+    /// Carbon の bitwise flag (`cmdKey | optionKey | controlKey | shiftKey`)。
+    let modifiers: UInt32
+    let display: String
+
+    /// v0.5 から続く既定値: ⌃⌥⌘K。
+    /// 環境設定でカスタマイズされていない時 / 破損値で復帰するときの fallback でもある。
+    static let `default` = KuraHotKey(
+        keyCode: UInt32(kVK_ANSI_K),
+        modifiers: UInt32(controlKey | optionKey | cmdKey),
+        display: "⌃⌥⌘K"
+    )
+}
+
 /// 環境設定を UserDefaults / SMAppService に永続化する単一エントリ。
 /// 値変更時に `.kuraPreferencesDidChange` を post し、購読側が UI を追従する。
 /// AppOrderStore と同じく static methods で 1 箇所に集約する設計。
@@ -39,8 +59,11 @@ extension Notification.Name {
 @MainActor
 enum PreferencesStore {
     private enum Keys {
-        static let symbolName   = "kura.symbol.name"
-        static let foldOnLaunch = "kura.foldOnLaunch"
+        static let symbolName       = "kura.symbol.name"
+        static let foldOnLaunch     = "kura.foldOnLaunch"
+        static let hotKeyKeyCode    = "kura.hotKey.keyCode"
+        static let hotKeyModifiers  = "kura.hotKey.modifiers"
+        static let hotKeyDisplay    = "kura.hotKey.display"
     }
 
     /// 蔵アイコンの symbol。
@@ -95,6 +118,42 @@ enum PreferencesStore {
                       String(describing: error))
                 // 失敗時は post しない（status が変わっていないため）。
             }
+        }
+    }
+
+    /// 折りたたみ／展開トグルのグローバルホットキー。
+    /// getter: 3 つの key が揃って読めた場合のみその値、いずれかが欠けていたら `.default` (⌃⌥⌘K)。
+    ///         keyCode == 0 (= 未設定や破損) も `.default` に倒す
+    ///         (kVK_ANSI_A=0 とは別物。Carbon RegisterEventHotKey に 0 を渡すと未定義動作)。
+    /// setter: 既存値と Equatable 比較し同値なら post を skip (foldOnLaunch / symbol と同じ流儀)。
+    ///         3 つの key を atomic に書き換える保証はないが、UserDefaults は最終的に flush されるので
+    ///         次回読み込み時には揃って入っている前提でよい。
+    static var hotKey: KuraHotKey {
+        get {
+            let defaults = UserDefaults.standard
+            let rawKeyCode = defaults.object(forKey: Keys.hotKeyKeyCode) as? Int
+            let rawModifiers = defaults.object(forKey: Keys.hotKeyModifiers) as? Int
+            let display = defaults.string(forKey: Keys.hotKeyDisplay)
+            guard let rawKeyCode = rawKeyCode,
+                  let rawModifiers = rawModifiers,
+                  let display = display,
+                  rawKeyCode > 0,
+                  !display.isEmpty else {
+                return .default
+            }
+            return KuraHotKey(
+                keyCode: UInt32(rawKeyCode),
+                modifiers: UInt32(rawModifiers),
+                display: display
+            )
+        }
+        set {
+            guard newValue != hotKey else { return }
+            let defaults = UserDefaults.standard
+            defaults.set(Int(newValue.keyCode), forKey: Keys.hotKeyKeyCode)
+            defaults.set(Int(newValue.modifiers), forKey: Keys.hotKeyModifiers)
+            defaults.set(newValue.display, forKey: Keys.hotKeyDisplay)
+            NotificationCenter.default.post(name: .kuraPreferencesDidChange, object: nil)
         }
     }
 }
