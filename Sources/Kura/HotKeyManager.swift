@@ -36,6 +36,12 @@ final class HotKeyManager {
     /// 現在登録中のホットキー ref。`update` で旧 ref を unregister するために instance で保持する。
     /// 登録失敗時は nil のまま（次回 update で再試行可能）。
     private var hotKeyRef: EventHotKeyRef?
+    /// 現在 (もしくは直近に試みた) (keyCode, modifiers)。`update` 内の差分判定に使う。
+    /// 登録失敗時も新値で更新するので、同じ値で繰り返し失敗を試行しない（別キーに変えれば再試行可能）。
+    /// `.kuraPreferencesDidChange` は symbol / foldOnLaunch / appExclusion などホットキー以外でも飛んでくるため、
+    /// 「無関係な通知で毎回 RegisterEventHotKey を叩く」コストを HotKeyManager 自身が吸収する責務を持つ。
+    private var currentKeyCode: UInt32?
+    private var currentModifiers: UInt32?
 
     /// ホットキーを登録。`keyCode` は Carbon の VK 定数（例: `kVK_ANSI_K`）、
     /// `modifiers` は `cmdKey | optionKey | controlKey` 等の bitwise OR。
@@ -52,11 +58,12 @@ final class HotKeyManager {
     }
 
     /// 環境設定でホットキーが変更されたときに呼ぶ再登録経路。
-    /// 旧 ref を `UnregisterEventHotKey` で解除してから新 ref を登録する。
+    /// 同値なら no-op（呼び出し側で差分判定不要）、変化があったら旧 ref を `UnregisterEventHotKey` で解除してから新 ref を登録する。
     /// handler 自体は init 時のものを継続使用する。
     /// 旧 ref の解放に失敗しても新規登録は試みる（OS 側で残った場合でも、新規登録さえ成功すれば
     /// 自プロセスは新キーで反応する。Carbon は非排他登録なので旧キーが残っていても他害は限定的）。
     func update(keyCode: UInt32, modifiers: UInt32) {
+        guard keyCode != currentKeyCode || modifiers != currentModifiers else { return }
         unregisterHotKey()
         registerHotKey(keyCode: keyCode, modifiers: modifiers)
     }
@@ -66,6 +73,10 @@ final class HotKeyManager {
         var ref: EventHotKeyRef?
         let status = RegisterEventHotKey(keyCode, modifiers, eventID,
                                          GetApplicationEventTarget(), 0, &ref)
+        // 失敗時も current(KeyCode/Modifiers) を更新するので、同値での無限再試行を避けつつ
+        // 別キーに変更された時には差分判定で必ず再登録が走る。
+        currentKeyCode = keyCode
+        currentModifiers = modifiers
         guard status == noErr, let ref = ref else {
             NSLog("[Kura] HotKey register failed status=\(status) keyCode=\(keyCode) modifiers=\(modifiers)")
             return

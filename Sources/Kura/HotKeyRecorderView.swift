@@ -117,34 +117,19 @@ final class HotKeyRecorderView: NSView {
         super.draw(dirtyRect)
         let bg = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
                               xRadius: 5, yRadius: 5)
-        if isRecording {
-            NSColor.controlAccentColor.withAlphaComponent(0.15).setFill()
-        } else {
-            NSColor.controlBackgroundColor.setFill()
-        }
+        let (fillColor, strokeColor, label, textColor): (NSColor, NSColor, String, NSColor) = isRecording
+            ? (.controlAccentColor.withAlphaComponent(0.15), .controlAccentColor, "キーを押してください…", .secondaryLabelColor)
+            : (.controlBackgroundColor, .separatorColor, hotKey.display, .labelColor)
+        fillColor.setFill()
         bg.fill()
-        if isRecording {
-            NSColor.controlAccentColor.setStroke()
-        } else {
-            NSColor.separatorColor.setStroke()
-        }
+        strokeColor.setStroke()
         bg.lineWidth = 1
         bg.stroke()
 
-        let label: String
-        let color: NSColor
-        if isRecording {
-            label = "キーを押してください…"
-            color = .secondaryLabelColor
-        } else {
-            label = hotKey.display
-            color = .labelColor
-        }
-        let attrs: [NSAttributedString.Key: Any] = [
+        let attributed = NSAttributedString(string: label, attributes: [
             .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-            .foregroundColor: color
-        ]
-        let attributed = NSAttributedString(string: label, attributes: attrs)
+            .foregroundColor: textColor
+        ])
         let textSize = attributed.size()
         let origin = NSPoint(
             x: (bounds.width - textSize.width) / 2,
