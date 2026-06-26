@@ -6,9 +6,9 @@ import Carbon.HIToolbox
 ///
 /// 動作:
 /// - 通常時: 現在の `hotKey.display` をボタン風に表示
-/// - クリック (or Space / Return): recording 状態に遷移し firstResponder を取る
+/// - マウスクリック: recording 状態に遷移し firstResponder を取る (Tab navigation 経由の focus 取得は recording に突入しない)
 /// - recording 中の keyDown: modifier 1 つ以上 + 実キーが揃ったら確定、focus を手放す
-/// - recording 中の Escape: キャンセル、元の hotKey 表示に戻る
+/// - recording 中の Escape (modifier なし): キャンセル、元の hotKey 表示に戻る (Cmd+Esc 等は正規の hotkey 登録パスに流す)
 /// - view 外クリック / 他フィールドへの focus 移動: recording キャンセル
 ///
 /// 単独キー (modifier なし) や modifier のみの組み合わせは登録を拒否する
@@ -25,12 +25,19 @@ final class HotKeyRecorderView: NSView {
     /// recording で確定したホットキーを親に通知。recording キャンセル時は呼ばない。
     var onChange: ((KuraHotKey) -> Void)?
 
-    private var isRecording: Bool = false {
+    /// 録音モード中かどうか。録音中は store 側からの hotKey 上書きを尊重するため
+    /// 外部から read だけ可能にする (write は内部の状態遷移経由)。
+    private(set) var isRecording: Bool = false {
         didSet {
             guard isRecording != oldValue else { return }
             needsDisplay = true
         }
     }
+
+    /// 直前の mouseDown が `makeFirstResponder` を要求したかを記録するフラグ。
+    /// Tab navigation 経由の focus 取得ではこのフラグが立たないため、becomeFirstResponder で
+    /// recording に突入しない (誤入力で既存 hotKey を上書きしてしまうのを防ぐ)。
+    private var pendingRecordingActivation = false
 
     init(hotKey: KuraHotKey) {
         self.hotKey = hotKey
@@ -54,9 +61,12 @@ final class HotKeyRecorderView: NSView {
 
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
-        if ok {
+        // mouseDown 経由のときだけ recording に入る。Tab navigation や programmatic な
+        // makeFirstResponder では focus ring を出すだけで recording には突入しない。
+        if ok && pendingRecordingActivation {
             isRecording = true
         }
+        pendingRecordingActivation = false
         return ok
     }
 
@@ -65,8 +75,29 @@ final class HotKeyRecorderView: NSView {
         return super.resignFirstResponder()
     }
 
+    /// window から外されるタイミングで録音状態を強制的にクリアする。
+    /// AppKit は window close 時に必ず `resignFirstResponder` を呼ぶとは限らないため
+    /// (例えば accessory app で close せず orderOut した場合)、これがないと `isRecording=true` が
+    /// 残ったまま `PreferencesWindowController.reloadFromStore` の guard で永続的に sync が skip され、
+    /// 再 open 時に store の最新 hotKey が反映されなくなる。
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil {
+            isRecording = false
+            pendingRecordingActivation = false
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
+        // クリックでだけ recording に突入させる印を立ててから firstResponder を要求する。
+        // Tab navigation 経由の becomeFirstResponder ではこのフラグが立たないため即 recording にならない。
+        pendingRecordingActivation = true
+        let didActivate = window?.makeFirstResponder(self) ?? false
+        if !didActivate {
+            // 他の view が firstResponder を譲らない (resignFirstResponder で拒否) ときの可聴フィードバック。
+            pendingRecordingActivation = false
+            NSSound.beep()
+        }
     }
 
     /// recording 中のキー入力を capture。
@@ -80,11 +111,13 @@ final class HotKeyRecorderView: NSView {
             return
         }
         let keyCode = event.keyCode
-        if Int(keyCode) == kVK_Escape {
+        let carbonMods = Self.carbonModifiers(from: event.modifierFlags)
+        // Escape 単独 (modifier なし) は録音キャンセル。Cmd+Esc のように modifier が付く場合は
+        // 正当な hotkey 候補なので登録パスに流す。
+        if Int(keyCode) == kVK_Escape && carbonMods == 0 {
             window?.makeFirstResponder(nil)
             return
         }
-        let carbonMods = Self.carbonModifiers(from: event.modifierFlags)
         guard carbonMods != 0 else {
             // modifier なしの単独キー: 拒否してビープ
             NSSound.beep()
@@ -210,6 +243,13 @@ final class HotKeyRecorderView: NSView {
         case kVK_F10:            return "F10"
         case kVK_F11:            return "F11"
         case kVK_F12:            return "F12"
+        case kVK_F13:            return "F13"
+        case kVK_F14:            return "F14"
+        case kVK_F15:            return "F15"
+        case kVK_F16:            return "F16"
+        case kVK_F17:            return "F17"
+        case kVK_F18:            return "F18"
+        case kVK_F19:            return "F19"
         default:                 return nil
         }
     }

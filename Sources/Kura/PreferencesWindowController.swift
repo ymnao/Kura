@@ -308,7 +308,11 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         launchAtLoginCheckbox.state = PreferencesStore.launchAtLogin ? .on : .off
         // hotKey は recorder の onChange 経路では recorder 側で先に self.hotKey が更新されているが、
         // 「デフォルトに戻す」ボタン経由や外部からの変更でも UI を真値に追従させる。
-        hotKeyRecorder?.hotKey = PreferencesStore.hotKey
+        // ただし録音中は recorder のローカル状態を尊重する (ここで上書きすると入力中の hotKey 候補が消える)。
+        // 録音終了 (resignFirstResponder) は recorder 側で自動的に走るので別経路で同期される。
+        if let recorder = hotKeyRecorder, !recorder.isRecording {
+            recorder.hotKey = PreferencesStore.hotKey
+        }
     }
 
     @objc private func handlePreferencesDidChange() {
@@ -343,6 +347,12 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     }
 
     @objc private func resetHotKey(_ sender: NSButton) {
+        // 録音中に押されたら明示的に録音を終了させる (focus を外して resignFirstResponder で isRecording=false)。
+        // これがないと reloadFromStore の「録音中は recorder.hotKey を更新しない」ガードと組み合わさって
+        // UI が「キーを押してください…」のまま固まり、新しい既定値が反映されない。
+        if hotKeyRecorder?.isRecording == true {
+            window?.makeFirstResponder(nil)
+        }
         // 既定値が現在値と同じなら setter で post を skip するため、明示的に store の真値で UI も同期する。
         PreferencesStore.hotKey = .default
         reloadFromStore()
