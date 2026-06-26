@@ -45,14 +45,14 @@ final class HotKeyManager {
 
     /// ホットキーを登録。`keyCode` は Carbon の VK 定数（例: `kVK_ANSI_K`）、
     /// `modifiers` は `cmdKey | optionKey | controlKey` 等の bitwise OR。
-    /// EventHandler 登録 or HotKey 登録のどちらかが失敗した場合は NSLog 警告を残して何もしない。
     /// `handler` は static slot に格納し、後続の `update` でも継続使用する
     /// （Kura は toggleFold のみ対象なので handler は不変）。
+    /// EventHandler 登録 or HotKey 登録が失敗しても `handler` は代入する：
+    /// 次回 `update` で install を再試行し成功すれば、この handler が以降の callback に使われる。
     init(keyCode: UInt32, modifiers: UInt32, handler: @escaping @MainActor () -> Void) {
-        // EventHandler が無い状態で RegisterEventHotKey を呼ぶと、キーは OS に予約される
-        // ものの自プロセスでは処理されない状態になる（Carbon は非排他登録なので他アプリには
-        // 引き続き届くが、Kura 自身が反応しないのは無意味）。ハンドラ登録に失敗した時点で諦める。
-        guard Self.installSharedHandlerIfNeeded() else { return }
+        // 単一 instance 前提（複数作ると Self.handler が上書きで誤発火源になる）。
+        // production では AppDelegate に 1 個のみ。複数 init はテスト or 設計事故。
+        assert(Self.handler == nil, "HotKeyManager は単一 instance 前提（Self.handler を上書きする運用は未サポート）")
         Self.handler = handler
         registerHotKey(keyCode: keyCode, modifiers: modifiers)
     }
@@ -69,12 +69,19 @@ final class HotKeyManager {
     }
 
     private func registerHotKey(keyCode: UInt32, modifiers: UInt32) {
+        // 共有 EventHandler が無いと RegisterEventHotKey はキーを予約するだけで自プロセスに届かない。
+        // install は idempotent（sharedHandlerRef != nil なら即 true）なので毎回呼んでも安全。
+        // 失敗時は current(KeyCode/Modifiers) を更新せず、同値で再 update が来た時に再試行する経路を確保する。
+        guard Self.installSharedHandlerIfNeeded() else {
+            NSLog("[Kura] HotKey register skipped: shared handler not installed (retry on next update)")
+            return
+        }
         let eventID = EventHotKeyID(signature: Self.signature, id: Self.hotKeyID)
         var ref: EventHotKeyRef?
         let status = RegisterEventHotKey(keyCode, modifiers, eventID,
                                          GetApplicationEventTarget(), 0, &ref)
-        // 失敗時も current(KeyCode/Modifiers) を更新するので、同値での無限再試行を避けつつ
-        // 別キーに変更された時には差分判定で必ず再登録が走る。
+        // RegisterEventHotKey 自体の失敗時は current を更新する（同値での無限再試行を回避、
+        // 別キーに変更された時には差分判定で必ず再登録が走る）。
         currentKeyCode = keyCode
         currentModifiers = modifiers
         guard status == noErr, let ref = ref else {
