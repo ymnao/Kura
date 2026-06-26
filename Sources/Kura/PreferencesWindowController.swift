@@ -8,6 +8,7 @@ import AppKit
 /// タブ構成:
 /// - 「一般」: 蔵アイコン symbol / 起動時 fold / 自動起動
 /// - 「対象アプリ」: 蔵対象アプリの除外チェックボックス一覧 (NSTableView)
+/// - 「ホットキー」: 折りたたみ／展開トグルのキーカスタマイズ (HotKeyRecorderView)
 @MainActor
 final class PreferencesWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private var symbolPopUp: NSPopUpButton!
@@ -17,6 +18,7 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     private var displayedApps: [DisplayedApp] = []
     /// 一覧の空状態メッセージ。AX 走査前 / 蔵対象アプリがない場合に表示する。
     private var appsEmptyLabel: NSTextField!
+    private var hotKeyRecorder: HotKeyRecorderView!
 
     convenience init() {
         // `.miniaturizable` を含めない: accessory app は Dock アイコンを持たないため、
@@ -69,6 +71,11 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         appsItem.label = "対象アプリ"
         appsItem.view = buildAppsTab()
         tabView.addTabViewItem(appsItem)
+
+        let hotKeyItem = NSTabViewItem(identifier: "hotkey")
+        hotKeyItem.label = "ホットキー"
+        hotKeyItem.view = buildHotKeyTab()
+        tabView.addTabViewItem(hotKeyItem)
 
         contentView.addSubview(tabView)
         NSLayoutConstraint.activate([
@@ -129,7 +136,7 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
 
     private func buildAppsTab() -> NSView {
         let description = NSTextField(wrappingLabelWithString:
-            "蔵に格納するアプリを選んでください。チェックを外したアプリは蔵に入らず、メニューバーに残ります。")
+            "Kura のポップオーバーに表示するアプリを選んでください。チェックを外したアプリは Kura の管理対象から外れます。")
         description.font = .systemFont(ofSize: 11)
         description.textColor = .secondaryLabelColor
 
@@ -196,6 +203,53 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         return container
     }
 
+    private func buildHotKeyTab() -> NSView {
+        let description = NSTextField(wrappingLabelWithString:
+            "蔵の折りたたみ／展開を切り替えるグローバルショートカット。\nフィールドをクリックしてから、Control / Option / Shift / Command と組み合わせたキーを押してください。")
+        description.font = .systemFont(ofSize: 11)
+        description.textColor = .secondaryLabelColor
+
+        let label = NSTextField(labelWithString: "折りたたみ／展開:")
+
+        let recorder = HotKeyRecorderView(hotKey: PreferencesStore.hotKey)
+        recorder.onChange = { newHotKey in
+            PreferencesStore.hotKey = newHotKey
+        }
+        self.hotKeyRecorder = recorder
+
+        let row = NSStackView(views: [label, recorder])
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.alignment = .centerY
+
+        let resetButton = NSButton(title: "デフォルトに戻す (⌃⌥⌘K)",
+                                   target: self,
+                                   action: #selector(resetHotKey(_:)))
+        resetButton.bezelStyle = .rounded
+
+        let stack = NSStackView(views: [row, resetButton])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = NSView()
+        description.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(description)
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            description.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            description.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            description.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
+            stack.topAnchor.constraint(equalTo: description.bottomAnchor, constant: 16),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -16)
+        ])
+        return container
+    }
+
     /// 「対象アプリ」タブのデータソース。AppDelegate から showPreferences 時に注入される。
     /// 表示行 = 「現在 scan で見えているアプリ」+「除外済みだが scan に出ていない bundleId」の union。
     /// 後者を含めることで、起動していない除外アプリも一覧に表示でき、除外解除が可能になる。
@@ -252,6 +306,9 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         }
         foldOnLaunchCheckbox.state = PreferencesStore.foldOnLaunch ? .on : .off
         launchAtLoginCheckbox.state = PreferencesStore.launchAtLogin ? .on : .off
+        // hotKey は recorder の onChange 経路では recorder 側で先に self.hotKey が更新されているが、
+        // 「デフォルトに戻す」ボタン経由や外部からの変更でも UI を真値に追従させる。
+        hotKeyRecorder?.hotKey = PreferencesStore.hotKey
     }
 
     @objc private func handlePreferencesDidChange() {
@@ -282,6 +339,12 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         PreferencesStore.launchAtLogin = (sender.state == .on)
         // SMAppService.register/unregister が失敗してもチェックボックスの見た目が先に変わってしまうため、
         // store の真値で UI を全部再同期する (失敗時はチェックが元に戻る)。
+        reloadFromStore()
+    }
+
+    @objc private func resetHotKey(_ sender: NSButton) {
+        // 既定値が現在値と同じなら setter で post を skip するため、明示的に store の真値で UI も同期する。
+        PreferencesStore.hotKey = .default
         reloadFromStore()
     }
 

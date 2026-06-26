@@ -12,13 +12,16 @@ import Carbon.HIToolbox
 /// 別途必要（Kura は既に取得済みだが、ホットキー単独の手段としては重い）。
 /// Carbon `RegisterEventHotKey` は権限不要で、deprecated でもない。
 ///
-/// 単一ホットキー前提の設計（Kura は ⌃⌥⌘K のみ使用）。複数ホットキーが必要になった時点で
+/// 単一ホットキー前提の設計（Kura は折りたたみトグルのみ使用）。複数ホットキーが必要になった時点で
 /// registry/ID 払い出しを足すのは trivial なので、現状は最小構成にしておく。
 ///
 /// ライフサイクル: HotKeyManager は AppDelegate のライフタイム = アプリ寿命と同じ。
 /// プロセス終了時に OS が Carbon ホットキーを自動解除するため、明示的な
-/// `UnregisterEventHotKey` は行わない。Swift 6 では `@MainActor` class の nonisolated
-/// deinit から non-Sendable な `EventHotKeyRef` に触れないので、deinit 自体を持たない設計。
+/// `UnregisterEventHotKey` は通常呼ばない。ただし環境設定からホットキーを差し替える場合は
+/// `update(keyCode:modifiers:)` 内で旧 ref を unregister してから新 ref を登録する
+/// (旧キーが OS 側に残ったままになるのを防ぐ)。
+/// Swift 6 では `@MainActor` class の nonisolated deinit から non-Sendable な
+/// `EventHotKeyRef` に触れないため、解放経路は deinit ではなく MainActor 上の `update` 経由のみ。
 @MainActor
 final class HotKeyManager {
     /// 同プロセス内に別の Carbon ホットキー利用者がいた場合の誤発火防止用シグネチャ。
@@ -30,25 +33,65 @@ final class HotKeyManager {
     private static var handler: (@MainActor () -> Void)?
     private static var sharedHandlerRef: EventHandlerRef?
 
+    /// 現在登録中のホットキー ref。`update` で旧 ref を unregister するために instance で保持する。
+    /// 登録失敗時は nil のまま（次回 update で再試行可能）。
+    private var hotKeyRef: EventHotKeyRef?
+    /// 現在 (もしくは直近に試みた) (keyCode, modifiers)。`update` 内の差分判定に使う。
+    /// 登録失敗時も新値で更新するので、同じ値で繰り返し失敗を試行しない（別キーに変えれば再試行可能）。
+    /// `.kuraPreferencesDidChange` は symbol / foldOnLaunch / appExclusion などホットキー以外でも飛んでくるため、
+    /// 「無関係な通知で毎回 RegisterEventHotKey を叩く」コストを HotKeyManager 自身が吸収する責務を持つ。
+    private var currentKeyCode: UInt32?
+    private var currentModifiers: UInt32?
+
     /// ホットキーを登録。`keyCode` は Carbon の VK 定数（例: `kVK_ANSI_K`）、
     /// `modifiers` は `cmdKey | optionKey | controlKey` 等の bitwise OR。
     /// EventHandler 登録 or HotKey 登録のどちらかが失敗した場合は NSLog 警告を残して何もしない。
+    /// `handler` は static slot に格納し、後続の `update` でも継続使用する
+    /// （Kura は toggleFold のみ対象なので handler は不変）。
     init(keyCode: UInt32, modifiers: UInt32, handler: @escaping @MainActor () -> Void) {
         // EventHandler が無い状態で RegisterEventHotKey を呼ぶと、キーは OS に予約される
         // ものの自プロセスでは処理されない状態になる（Carbon は非排他登録なので他アプリには
         // 引き続き届くが、Kura 自身が反応しないのは無意味）。ハンドラ登録に失敗した時点で諦める。
         guard Self.installSharedHandlerIfNeeded() else { return }
+        Self.handler = handler
+        registerHotKey(keyCode: keyCode, modifiers: modifiers)
+    }
 
+    /// 環境設定でホットキーが変更されたときに呼ぶ再登録経路。
+    /// 同値なら no-op（呼び出し側で差分判定不要）、変化があったら旧 ref を `UnregisterEventHotKey` で解除してから新 ref を登録する。
+    /// handler 自体は init 時のものを継続使用する。
+    /// 旧 ref の解放に失敗しても新規登録は試みる（OS 側で残った場合でも、新規登録さえ成功すれば
+    /// 自プロセスは新キーで反応する。Carbon は非排他登録なので旧キーが残っていても他害は限定的）。
+    func update(keyCode: UInt32, modifiers: UInt32) {
+        guard keyCode != currentKeyCode || modifiers != currentModifiers else { return }
+        unregisterHotKey()
+        registerHotKey(keyCode: keyCode, modifiers: modifiers)
+    }
+
+    private func registerHotKey(keyCode: UInt32, modifiers: UInt32) {
         let eventID = EventHotKeyID(signature: Self.signature, id: Self.hotKeyID)
         var ref: EventHotKeyRef?
         let status = RegisterEventHotKey(keyCode, modifiers, eventID,
                                          GetApplicationEventTarget(), 0, &ref)
-        guard status == noErr, ref != nil else {
+        // 失敗時も current(KeyCode/Modifiers) を更新するので、同値での無限再試行を避けつつ
+        // 別キーに変更された時には差分判定で必ず再登録が走る。
+        currentKeyCode = keyCode
+        currentModifiers = modifiers
+        guard status == noErr, let ref = ref else {
             NSLog("[Kura] HotKey register failed status=\(status) keyCode=\(keyCode) modifiers=\(modifiers)")
             return
         }
-        Self.handler = handler
+        hotKeyRef = ref
         NSLog("[Kura] HotKey registered keyCode=\(keyCode) modifiers=\(modifiers)")
+    }
+
+    private func unregisterHotKey() {
+        guard let ref = hotKeyRef else { return }
+        let status = UnregisterEventHotKey(ref)
+        if status != noErr {
+            NSLog("[Kura] HotKey unregister failed status=\(status)")
+        }
+        hotKeyRef = nil
     }
 
     /// 共有ハンドラの登録を一度だけ試す。既に登録済み or 今回成功なら true、

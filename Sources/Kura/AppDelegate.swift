@@ -1,5 +1,4 @@
 import AppKit
-import Carbon.HIToolbox
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopoverDelegate {
@@ -8,8 +7,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// セパレータ（折りたたみ時に length 膨張、蔵の左に置かれる前提）
     private var separatorItem: NSStatusItem!
     private var popover: NSPopover!
-    /// グローバルホットキー（⌃⌥⌘K で折りたたみ／展開トグル）。
+    /// グローバルホットキー（デフォルト ⌃⌥⌘K で折りたたみ／展開トグル、環境設定で変更可）。
     /// アプリ寿命と同じライフタイムで保持し、プロセス終了時に OS が Carbon ホットキーを自動解除する。
+    /// 環境設定からのカスタマイズは `handlePreferencesDidChange` で `update(keyCode:modifiers:)` を呼ぶ
+    /// (差分判定は HotKeyManager 内部で行うため、無関係な設定変更通知でも安全に呼べる)。
     private var hotKeyManager: HotKeyManager?
 
     /// 蔵対象アプリの単一データソース。AppDelegate がスキャンの責任を持ち、
@@ -194,6 +195,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         // フォールバック状態 (SF Symbol load 失敗) から復帰できるよう、symbol 不変でも updateStatusIcon を呼ぶ。
         // updateStatusIcon は cache を read するだけなので低コスト。
         updateStatusIcon()
+        // ホットキー再登録。差分判定は HotKeyManager.update 内部で行うので、無関係な通知 (symbol 変更等) でも安全に no-op。
+        let hotKey = PreferencesStore.hotKey
+        hotKeyManager?.update(keyCode: hotKey.keyCode, modifiers: hotKey.modifiers)
         // 除外リスト (`AppExclusionStore`) 変更時に popover の表示を再フィルタで更新する。
         // 環境設定ウィンドウから除外切り替え時、popover が開いていれば即時反映。
         // 通常は環境設定がフォアグラウンドで popover は閉じているが、念のための復帰経路。
@@ -293,11 +297,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         popover.contentViewController = vc
     }
 
-    /// ⌃⌥⌘K で折りたたみ／展開トグル（詳細は ARCHITECTURE.md）。
+    /// 折りたたみ／展開トグルのグローバルホットキーを登録（デフォルト ⌃⌥⌘K、環境設定で変更可、詳細は ARCHITECTURE.md）。
+    /// カスタマイズ時は `handlePreferencesDidChange` で `hotKeyManager.update(keyCode:modifiers:)` を呼ぶ。
     private func setupHotKey() {
+        let hotKey = PreferencesStore.hotKey
         hotKeyManager = HotKeyManager(
-            keyCode: UInt32(kVK_ANSI_K),
-            modifiers: UInt32(controlKey | optionKey | cmdKey)
+            keyCode: hotKey.keyCode,
+            modifiers: hotKey.modifiers
         ) { [weak self] in
             self?.toggleFold(nil)
         }
