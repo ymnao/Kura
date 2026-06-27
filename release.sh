@@ -43,8 +43,15 @@ rm -f "$TMP_DMG"
 hdiutil create -volname "$VOLNAME" -srcfolder "$STAGING" -ov -format UDRW "$TMP_DMG" > /dev/null
 
 # 4. マウントして Finder ウィンドウのレイアウトを焼き込む
-MOUNT_DIR=$(mktemp -d)
-hdiutil attach "$TMP_DMG" -mountpoint "$MOUNT_DIR" -nobrowse -readwrite > /dev/null
+# -nobrowse だと Finder が disk を認識しないため AppleScript の `tell disk "Kura"` が -1728 で失敗する。
+# 代わりに /Volumes/Kura に固定マウント + -noautoopen で Finder window auto-open だけ抑制する。
+MOUNT_POINT="/Volumes/$VOLNAME"
+if [[ -d "$MOUNT_POINT" ]]; then
+    echo "==> detaching existing $MOUNT_POINT"
+    hdiutil detach "$MOUNT_POINT" > /dev/null 2>&1 || true
+fi
+hdiutil attach "$TMP_DMG" -noautoopen -readwrite -mountpoint "$MOUNT_POINT" > /dev/null
+sleep 2  # Finder が disk を認識するまで待つ
 
 # 5. osascript で Finder ウィンドウ設定 (ウィンドウサイズ / アイコン位置 / 背景画像)
 echo "==> applying Finder window layout"
@@ -71,8 +78,7 @@ end tell
 APPLESCRIPT
 
 # 6. dmg を unmount
-hdiutil detach "$MOUNT_DIR" > /dev/null
-rm -rf "$MOUNT_DIR"
+hdiutil detach "$MOUNT_POINT" > /dev/null
 
 # 7. UDZO (圧縮 read-only) に変換して最終 dmg を生成
 echo "==> compress to UDZO"
