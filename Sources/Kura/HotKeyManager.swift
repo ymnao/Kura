@@ -40,8 +40,9 @@ final class HotKeyManager {
     /// 登録失敗時も新値で更新するので、同じ値で繰り返し失敗を試行しない（別キーに変えれば再試行可能）。
     /// `.kuraPreferencesDidChange` は symbol / foldOnLaunch / appExclusion などホットキー以外でも飛んでくるため、
     /// 「無関係な通知で毎回 RegisterEventHotKey を叩く」コストを HotKeyManager 自身が吸収する責務を持つ。
-    private var currentKeyCode: UInt32?
-    private var currentModifiers: UInt32?
+    /// keyCode と modifiers は常に揃って更新するので tuple optional として 1 つの状態にまとめる
+    /// （片方だけ nil / 片方だけ最新値、のような中間状態を型で排除する）。
+    private var current: (keyCode: UInt32, modifiers: UInt32)?
 
     /// ホットキーを登録。`keyCode` は Carbon の VK 定数（例: `kVK_ANSI_K`）、
     /// `modifiers` は `cmdKey | optionKey | controlKey` 等の bitwise OR。
@@ -63,7 +64,7 @@ final class HotKeyManager {
     /// 旧 ref の解放に失敗しても新規登録は試みる（OS 側で残った場合でも、新規登録さえ成功すれば
     /// 自プロセスは新キーで反応する。Carbon は非排他登録なので旧キーが残っていても他害は限定的）。
     func update(keyCode: UInt32, modifiers: UInt32) {
-        guard keyCode != currentKeyCode || modifiers != currentModifiers else { return }
+        guard current?.keyCode != keyCode || current?.modifiers != modifiers else { return }
         unregisterHotKey()
         registerHotKey(keyCode: keyCode, modifiers: modifiers)
     }
@@ -71,7 +72,7 @@ final class HotKeyManager {
     private func registerHotKey(keyCode: UInt32, modifiers: UInt32) {
         // 共有 EventHandler が無いと RegisterEventHotKey はキーを予約するだけで自プロセスに届かない。
         // install は idempotent（sharedHandlerRef != nil なら即 true）なので毎回呼んでも安全。
-        // 失敗時は current(KeyCode/Modifiers) を更新せず、同値で再 update が来た時に再試行する経路を確保する。
+        // 失敗時は current を更新せず、同値で再 update が来た時に再試行する経路を確保する。
         guard Self.installSharedHandlerIfNeeded() else {
             NSLog("[Kura] HotKey register skipped: shared handler not installed (retry on next update)")
             return
@@ -82,8 +83,7 @@ final class HotKeyManager {
                                          GetApplicationEventTarget(), 0, &ref)
         // RegisterEventHotKey 自体の失敗時は current を更新する（同値での無限再試行を回避、
         // 別キーに変更された時には差分判定で必ず再登録が走る）。
-        currentKeyCode = keyCode
-        currentModifiers = modifiers
+        current = (keyCode, modifiers)
         guard status == noErr, let ref = ref else {
             NSLog("[Kura] HotKey register failed status=\(status) keyCode=\(keyCode) modifiers=\(modifiers)")
             return
