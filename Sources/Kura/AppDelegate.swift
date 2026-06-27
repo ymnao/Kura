@@ -323,13 +323,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         let kuraX = window.frame.minX
         // 蔵が乗っているスクリーンを特定。マルチディスプレイで「別画面の正常な要素」を
         // 誤って蔵対象にしてしまわないよう、scan 側のフィルタで使う。
-        let screen = NSScreen.screens.first { $0.frame.intersects(window.frame) }
+        // `NSScreen.screens` は呼び出しごとに新しい配列を返すため、スコープ内で 1 度
+        // スナップショットを取り、scan 内の一貫性 (画面構成変化の race 回避) も同時に確保する。
+        let screens = NSScreen.screens
+        let screen = screens.first { $0.frame.intersects(window.frame) }
             ?? NSScreen.main
-            ?? NSScreen.screens.first
+            ?? screens.first
         guard let kuraScreenFrame = screen?.frame else { return }
         // NSScreen.frame は AppKit 左下原点、kAXPositionAttribute は主画面左上原点 (Y 下向き) なので
         // scan で contains 判定するために AX 座標系へ変換する。
-        let mainHeight = (NSScreen.screens.first { $0.frame.origin == .zero } ?? screen!).frame.height
+        let mainHeight = (screens.first { $0.frame.origin == .zero } ?? screen!).frame.height
         let kuraScreenFrameInAX = CGRect(
             x: kuraScreenFrame.origin.x,
             y: mainHeight - kuraScreenFrame.origin.y - kuraScreenFrame.height,
