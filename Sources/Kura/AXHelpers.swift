@@ -2,8 +2,16 @@ import ApplicationServices
 
 /// AX (Accessibility) API の小さなラッパ群。MenuBarScanner / MenuBarLayoutScanner で共有。
 enum AXHelpers {
-    /// 他アプリの AX 呼び出しのタイムアウト。1.0 秒で問題ないことが実機で確認済み。
-    static let messagingTimeout: Float = 1.0
+    /// 他アプリの AX 呼び出しのタイムアウト。
+    /// 折りたたみコミット前に位置 scan + 全 AppNode メニュー詳細 scan の完了を await するため、
+    /// 1 つのアプリが timeout 限界まで粘ると fold レイテンシに直結する。実機では応答時間が
+    /// ms オーダーなので 0.5 秒で十分。
+    /// timeout 短縮の副作用: top-level (`AXExtrasMenuBar` / `AXChildren`) が `cannotComplete`
+    /// を返した場合は `MenuBarLayoutScanner` 側で `.noStatusItems` に倒すため、対象アプリから
+    /// silent に外れる (fold はブロックされない)。一方 per-item の `kAXPositionAttribute` で
+    /// `cannotComplete` が出ると `.transientFailure` → `failedBundleIds` 入りで fold をブロックする。
+    /// 0.5-1.0s 帯のアプリで両者が起きうるため、実機計測 (foldTiming NSLog) で支障が出たら戻す。
+    static let messagingTimeout: Float = 0.5
 
     /// 属性値を取り出す（生 CFTypeRef）。
     static func copyAttribute(_ element: AXUIElement, _ attribute: String) -> AnyObject? {
