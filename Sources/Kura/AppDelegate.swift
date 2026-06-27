@@ -390,6 +390,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         if !isFolded, let vc = popover.contentViewController as? KuraViewController {
             vc.setTargets(visibleApps)
         }
+        // .items のときだけ post。.unauthorized / .cancelled は lastScanResult が更新されないため、
+        // post しても受信側が同じ内容で再描画するだけで無駄。
+        if case .items = result {
+            NotificationCenter.default.post(
+                name: .kuraDidCompleteScan,
+                object: nil,
+                userInfo: ["apps": lastScanResult]
+            )
+        }
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {

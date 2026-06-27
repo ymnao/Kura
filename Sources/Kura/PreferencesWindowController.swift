@@ -47,6 +47,15 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
             name: .kuraPreferencesDidChange,
             object: nil
         )
+        // AppDelegate の scan 完了通知を購読。warmup scan (0.1/2/5/10s) 完了前にウィンドウを
+        // 開かれて「対象アプリ」タブが空表示で固定される問題 (#13) を解消するため、scan が
+        // 確定したタイミングで該当タブを最新化する。
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleScanCompleted(_:)),
+            name: .kuraDidCompleteScan,
+            object: nil
+        )
     }
 
     deinit {
@@ -328,6 +337,14 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
                          isExcluded: excluded.contains($0.bundleId))
         }
         reloadAppsTable()
+    }
+
+    @objc private func handleScanCompleted(_ notification: Notification) {
+        // ウィンドウが見えていない間は再注入を skip。再表示時は showPreferences → setScanResult で
+        // 最新値が流れるため、見えていない間に reload しても観察可能な効果がなく cost のみ発生する。
+        guard window?.isVisible == true,
+              let apps = notification.userInfo?["apps"] as? [StatusBarApp] else { return }
+        setScanResult(apps)
     }
 
     @objc private func symbolChanged(_ sender: NSPopUpButton) {
