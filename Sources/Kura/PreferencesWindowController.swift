@@ -19,6 +19,9 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     /// 一覧の空状態メッセージ。AX 走査前 / 蔵対象アプリがない場合に表示する。
     private var appsEmptyLabel: NSTextField!
     private var hotKeyRecorder: HotKeyRecorderView!
+    /// 起動していない除外アプリの icon を background で逆引きする Task。
+    /// setScanResult が連続して呼ばれた際に前回をキャンセルする (#15)。
+    private var lazyIconTask: Task<Void, Never>?
 
     convenience init() {
         // `.miniaturizable` を含めない: accessory app は Dock アイコンを持たないため、
@@ -52,6 +55,7 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        lazyIconTask?.cancel()
     }
 
     private func buildContent() {
@@ -257,6 +261,7 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     func setScanResult(_ apps: [StatusBarApp]) {
         displayedApps = buildDisplayedApps(scanResult: apps)
         reloadAppsTable()
+        fetchLazyIconsForUnseenExcluded(scanResult: apps)
     }
 
     private func reloadAppsTable() {
@@ -284,17 +289,67 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         }
         // 残った unseenExcluded = アプリが起動していない or 蔵より右にいて scan 対象外、等。
         // 並び順を安定させるため sorted する (Set の列挙順は非決定的)。
-        // bundleId からの (icon, name) 逆引きは StatusBarApp.lookupInfo に集約済み。
+        // ここでは lookupInfo を呼ばず placeholder (icon=nil, name=bundleId) を即時返す:
+        // lookupInfo は内部で NSWorkspace.urlForApplication / icon(forFile:) /
+        // FileManager.displayName(atPath:) を呼び disk I/O を起こすため、除外リストが育った
+        // ユーザーで MainActor が jank する (#15)。
+        // 実値は setScanResult 末尾で kick する fetchLazyIconsForUnseenExcluded で
+        // background Task が逆引きし、行を差分 reload する。
         for bundleId in unseenExcluded.sorted() {
-            let info = StatusBarApp.lookupInfo(bundleId: bundleId)
             result.append(DisplayedApp(
                 bundleId: bundleId,
-                name: info.name,
-                icon: info.icon,
+                name: bundleId,
+                icon: nil,
                 isExcluded: true
             ))
         }
         return result
+    }
+
+    /// scan に出ていない除外済み bundleId の icon/name を background で逆引きし、
+    /// 取得できた行を差分 reload する。lookupInfo は内部 NSCache で memoize されるため
+    /// 連続実行でも 2 回目以降は cache hit、初回のみ disk I/O を負担する。
+    /// 連続 setScanResult (warmup 中の handleScanCompleted 複数回など) では前回 Task を
+    /// cancel して新 Task を kick する (途中 cancel されても lookupInfo の cache は残るため
+    /// 次回 Task は実質 free)。
+    private func fetchLazyIconsForUnseenExcluded(scanResult: [StatusBarApp]) {
+        let scanBundles = Set(scanResult.map { $0.bundleIdentifier })
+        let lazyBundles = displayedApps
+            .map { $0.bundleId }
+            .filter { !scanBundles.contains($0) }
+        lazyIconTask?.cancel()
+        guard !lazyBundles.isEmpty else {
+            lazyIconTask = nil
+            return
+        }
+        lazyIconTask = Task.detached(priority: .userInitiated) { [weak self] in
+            for bundleId in lazyBundles {
+                if Task.isCancelled { return }
+                // background スレッドで lookupInfo を呼んで NSCache を温める
+                // (戻り値の NSImage は MainActor 側で再 lookup して取り直すため捨てる)。
+                _ = StatusBarApp.lookupInfo(bundleId: bundleId)
+                await self?.applyLazyIcon(bundleId: bundleId)
+            }
+        }
+    }
+
+    /// background fetch で温まった NSCache から MainActor 上で再 lookup (cache hit) し、
+    /// 対象行の icon/name を差分 reload する。NSImage の Sendable を跨がせないために
+    /// lookupInfo を 2 度呼ぶ (2 度目は cache hit で軽量)。
+    private func applyLazyIcon(bundleId: String) {
+        guard let row = displayedApps.firstIndex(where: { $0.bundleId == bundleId }) else { return }
+        let info = StatusBarApp.lookupInfo(bundleId: bundleId)
+        let old = displayedApps[row]
+        displayedApps[row] = DisplayedApp(
+            bundleId: old.bundleId,
+            name: info.name,
+            icon: info.icon,
+            isExcluded: old.isExcluded
+        )
+        appsTableView?.reloadData(
+            forRowIndexes: IndexSet(integer: row),
+            columnIndexes: IndexSet(integer: 0)
+        )
     }
 
     /// ウィンドウ表示直前に store の最新値で UI を同期する。
@@ -464,8 +519,10 @@ private final class AppRowView: NSTableCellView {
         currentBundleId = app.bundleId
         checkbox.state = app.isExcluded ? .off : .on
         // 起動していない除外アプリ等で icon が nil の場合は placeholder を出す (空白だと違和感がある)。
-        iconView.image = app.icon ?? NSImage(systemSymbolName: "questionmark.app.dashed",
-                                             accessibilityDescription: "未取得")
+        // placeholder (SF Symbol) も nil の場合は描画済みテキストフォールバックに落とす (#17):
+        // AppDelegate.updateStatusIcon の「蔵」テキストフォールバックと整合的にし、極小確率の
+        // SF Symbols カタログ変動 / グラフィックス初期化失敗で 18x18 の空白が残るのを防ぐ。
+        iconView.image = app.icon ?? Self.placeholderIcon
         nameLabel.stringValue = app.name
     }
 
@@ -473,4 +530,29 @@ private final class AppRowView: NSTableCellView {
         guard let id = currentBundleId else { return }
         onCheckChanged?(id, sender.state == .on)
     }
+
+    /// 3 段フォールバック: SF Symbol → 描画済み "?" テキスト。
+    /// init 後の最初の参照で 1 度だけ評価され、以降は cached NSImage を返す。
+    private static let placeholderIcon: NSImage = {
+        if let symbol = NSImage(systemSymbolName: "questionmark.app.dashed",
+                                accessibilityDescription: "未取得") {
+            return symbol
+        }
+        let size = NSSize(width: 18, height: 18)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 14, weight: .medium),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+        let text = "?" as NSString
+        let textSize = text.size(withAttributes: attrs)
+        let point = NSPoint(
+            x: (size.width - textSize.width) / 2,
+            y: (size.height - textSize.height) / 2
+        )
+        text.draw(at: point, withAttributes: attrs)
+        image.unlockFocus()
+        return image
+    }()
 }
