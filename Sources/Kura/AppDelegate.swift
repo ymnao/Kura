@@ -20,23 +20,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// VC への `setTargets` 直前に `visibleApps` 経由で除外を適用する。
     private var lastScanResult: [StatusBarApp] = []
 
-    /// `lastScanResult` から除外設定を適用した popover 表示対象の cache。
-    /// AppOrderStore.applied → AppExclusionStore.filtered の順で適用される
-    /// (lastScanResult が AppOrderStore.applied 済みなので、ここでは filter だけ)。
-    /// `lastScanResult` 変更時と除外設定変更時に `recomputeVisibleApps` で再計算する。
-    /// 旧 computed property だと popover を 1 回開く間に複数経路 (applyScanResult /
-    /// togglePopover / handlePreferencesDidChange) で読まれ、その度に
-    /// AppExclusionStore.load → Set 化 → filter が走っていた (#18)。
+    /// `lastScanResult` (AppOrderStore.applied 済み) に除外設定を適用した popover 表示対象の cache。
+    /// popover の read 経路で重複 filter を避けるため stored で持ち、`lastScanResult` 変更時 +
+    /// 除外設定変更時に `recomputeVisibleApps` で更新する。
     private var visibleApps: [StatusBarApp] = []
 
     /// `visibleApps` を最新の `lastScanResult` + 除外設定で再計算する。
-    /// 呼び出し責務:
-    /// - applyScanResult で lastScanResult を更新した直後
-    /// - onReorder で lastScanResult を applied 順に並べ替えた直後
-    /// - handlePreferencesDidChange で除外設定変更を受信した時
-    /// computed property のままにせず明示メソッドにすることで、再計算タイミングを
-    /// caller 側に集約し、popover read 経路 (vc.setTargets(visibleApps)) では純粋な
-    /// stored property read だけになるようにする。
+    /// 呼び出し責務: applyScanResult / onReorder (`lastScanResult` 更新直後) +
+    /// handlePreferencesDidChange (除外設定変更受信時)。
     private func recomputeVisibleApps() {
         visibleApps = AppExclusionStore.filtered(lastScanResult)
     }

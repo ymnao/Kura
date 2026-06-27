@@ -42,6 +42,10 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         // showWindow を経由しない経路 (NSWindow restoration 等) でも UI が初期値で残らないよう、
         // ここでも初期値を流し込む。showWindow も冒頭で reloadFromStore を呼ぶが idempotent。
         reloadFromStore()
+        // `.kuraPreferencesDidChange` は購読しない: 現状 AppExclusionStore.setExcluded を
+        // 呼ぶ writer は onCheckChanged 経路のみで、その場で updateRowExclusion が差分 reload
+        // する。将来 URL handler / リセットボタン等の外部 writer が増えた場合は、ここで
+        // 再購読して全件再計算経路を復活させる必要がある (table は古いまま固定されてしまうため)。
         // AppDelegate の scan 完了通知を購読。warmup scan (0.1/2/5/10s) 完了前にウィンドウを
         // 開かれて「対象アプリ」タブが空表示で固定される問題 (#13) を解消するため、scan が
         // 確定したタイミングで該当タブを最新化する。
@@ -64,7 +68,9 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        lazyIconTask?.cancel()
+        // lazyIconTask の cancel は handleWindowWillClose が担当する。
+        // controller は AppDelegate に保持され `isReleasedWhenClosed = false` のため、
+        // deinit はプロセス終了時にしか fire せず、ここで cancel しても観察可能な効果がない。
     }
 
     private func buildContent() {
@@ -321,10 +327,8 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     }
 
     /// 指定 bundleId 群の icon/name を background で逆引きし、取得できた行を差分 reload する。
-    /// lookupInfo は内部 NSCache で memoize されるため連続実行でも 2 回目以降は cache hit、
-    /// 初回のみ disk I/O を負担する。連続 setScanResult (warmup 中の handleScanCompleted
-    /// 複数回など) では前回 Task を cancel して新 Task を kick する (途中 cancel されても
-    /// lookupInfo の cache は残るため次回 Task は実質 free)。
+    /// 連続 setScanResult (warmup 中の handleScanCompleted 複数回など) では前回 Task を
+    /// cancel して新 Task を kick する。
     private func fetchLazyIcons(for bundleIds: [String]) {
         lazyIconTask?.cancel()
         guard !bundleIds.isEmpty else { return }
@@ -344,14 +348,7 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     /// lookupInfo を 2 度呼ぶ (2 度目は cache hit で軽量)。
     private func applyLazyIcon(bundleId: String) {
         let info = StatusBarApp.lookupInfo(bundleId: bundleId)
-        mutateDisplayedApp(bundleId: bundleId) { old in
-            DisplayedApp(
-                bundleId: old.bundleId,
-                name: info.name,
-                icon: info.icon,
-                isExcluded: old.isExcluded
-            )
-        }
+        mutateDisplayedApp(bundleId: bundleId) { $0.with(name: info.name, icon: info.icon) }
     }
 
     /// ウィンドウ表示直前に store の最新値で UI を同期する。
@@ -378,14 +375,7 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     /// `displayedApps[row]` を真値で更新しないと cell view 再利用 (スクロール後の再描画) で
     /// 古い isExcluded が読まれる。
     private func updateRowExclusion(bundleId: String, isExcluded: Bool) {
-        mutateDisplayedApp(bundleId: bundleId) { old in
-            DisplayedApp(
-                bundleId: old.bundleId,
-                name: old.name,
-                icon: old.icon,
-                isExcluded: isExcluded
-            )
-        }
+        mutateDisplayedApp(bundleId: bundleId) { $0.with(isExcluded: isExcluded) }
     }
 
     /// `displayedApps` の単一行を bundleId で探して `transform` で置き換え、その行だけ差分 reload する。
@@ -402,7 +392,6 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
 
     @objc private func handleWindowWillClose(_ notification: Notification) {
         lazyIconTask?.cancel()
-        lazyIconTask = nil
     }
 
     @objc private func handleScanCompleted(_ notification: Notification) {
@@ -484,6 +473,16 @@ private struct DisplayedApp {
     let name: String
     let icon: NSImage?
     let isExcluded: Bool
+
+    /// background fetch で確定した (name, icon) で差し替えた copy を返す。
+    func with(name: String, icon: NSImage?) -> DisplayedApp {
+        DisplayedApp(bundleId: bundleId, name: name, icon: icon, isExcluded: isExcluded)
+    }
+
+    /// チェック切り替えで除外状態だけ差し替えた copy を返す。
+    func with(isExcluded: Bool) -> DisplayedApp {
+        DisplayedApp(bundleId: bundleId, name: name, icon: icon, isExcluded: isExcluded)
+    }
 }
 
 /// NSTableView の 1 行を構成する view。チェックボックス + アイコン + アプリ名を NSStackView で横並びに。
