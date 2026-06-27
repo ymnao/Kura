@@ -30,6 +30,11 @@ enum KuraSymbol: String, CaseIterable {
 extension Notification.Name {
     /// 環境設定値が変わったことを通知する。AppDelegate がアイコン再描画等で購読する。
     static let kuraPreferencesDidChange = Notification.Name("kura.preferences.didChange")
+    /// AppDelegate の layout scan が完了 (またはキャンセル/未認可で「結果」が確定) したことを通知する。
+    /// 環境設定ウィンドウ等、AppDelegate の scan 結果に追従したい UI が購読する。
+    /// 起動直後の warmup scan を待たずに開かれた環境設定タブが空表示で固定される問題への対応として、
+    /// AppDelegate が `window.isVisible` を直接読む結合を避けるために導入。
+    static let kuraDidCompleteScan = Notification.Name("kura.didCompleteScan")
 }
 
 /// 折りたたみ／展開トグルのグローバルホットキー設定。
