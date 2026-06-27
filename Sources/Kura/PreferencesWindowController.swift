@@ -342,8 +342,8 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     @objc private func handleScanCompleted(_ notification: Notification) {
         // ウィンドウが見えていない間は再注入を skip。再表示時は showPreferences → setScanResult で
         // 最新値が流れるため、見えていない間に reload しても観察可能な効果がなく cost のみ発生する。
-        guard window?.isVisible == true else { return }
-        guard let apps = notification.userInfo?["apps"] as? [StatusBarApp] else { return }
+        guard window?.isVisible == true,
+              let apps = notification.userInfo?["apps"] as? [StatusBarApp] else { return }
         setScanResult(apps)
     }
 

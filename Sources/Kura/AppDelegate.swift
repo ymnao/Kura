@@ -390,16 +390,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         if !isFolded, let vc = popover.contentViewController as? KuraViewController {
             vc.setTargets(visibleApps)
         }
-        // scan 完了を購読側に通知。環境設定ウィンドウなど「scan 結果に追従したい UI」が
-        // 自分の visible 判定 + setScanResult 呼び出しを担当する (AppDelegate は UI 状態に依存しない)。
-        // 起動直後の warmup scan (0.1/2/5/10s) 完了前に環境設定を開かれて空表示で固定される
-        // UX 不具合は、PreferencesWindowController 側の購読で解消される。
-        // userInfo に lastScanResult を載せて受信側が AppDelegate を参照しなくて済むようにする。
-        NotificationCenter.default.post(
-            name: .kuraDidCompleteScan,
-            object: nil,
-            userInfo: ["apps": lastScanResult]
-        )
+        // .items のときだけ post。.unauthorized / .cancelled は lastScanResult が更新されないため、
+        // post しても受信側が同じ内容で再描画するだけで無駄。
+        if case .items = result {
+            NotificationCenter.default.post(
+                name: .kuraDidCompleteScan,
+                object: nil,
+                userInfo: ["apps": lastScanResult]
+            )
+        }
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
