@@ -78,17 +78,6 @@ final class KuraViewController: NSViewController {
             height: Self.preferredPopoverHeight
         ))
 
-        let title = makeCursorlessLabel("蔵")
-        title.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
-        title.alignment = .center
-        title.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(title)
-
-        let separator = NSBox()
-        separator.boxType = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(separator)
-
         bannerContainer.wantsLayer = true
         bannerContainer.layer?.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.15).cgColor
         bannerContainer.layer?.cornerRadius = 6
@@ -136,7 +125,7 @@ final class KuraViewController: NSViewController {
             gridView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
         ])
 
-        emptyLabel.stringValue = "蔵の左にアイコンがありません\n\n隠したいメニューバーアイコンを\n蔵の左側にドラッグしてください"
+        emptyLabel.stringValue = "Kura の左にアイコンがありません\n\n隠したいメニューバーアイコンを\nKura の左側にドラッグしてください"
         emptyLabel.font = NSFont.systemFont(ofSize: 11)
         emptyLabel.textColor = .tertiaryLabelColor
         emptyLabel.alignment = .center
@@ -145,15 +134,7 @@ final class KuraViewController: NSViewController {
         container.addSubview(emptyLabel)
 
         NSLayoutConstraint.activate([
-            title.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
-            title.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-
-            separator.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
-            separator.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.contentHorizontalPadding),
-            separator.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Self.contentHorizontalPadding),
-            separator.heightAnchor.constraint(equalToConstant: 1),
-
-            bannerContainer.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 6),
+            bannerContainer.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
             bannerContainer.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.contentHorizontalPadding),
             bannerContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Self.contentHorizontalPadding),
 
