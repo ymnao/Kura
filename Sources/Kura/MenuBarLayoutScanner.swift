@@ -41,14 +41,42 @@ struct StatusBarApp: Hashable, Sendable {
     /// scan に出てこないアプリ (起動していない、蔵より右に移動した除外済み等) の
     /// 表示にも使えるよう static にする。インスタンスの `icon` も内部で本 helper を呼ぶ。
     /// 取得不可なら icon=nil、name=bundleId をそのまま返す (caller 側で placeholder 切替)。
+    ///
+    /// プロセスのライフタイム中は bundleId 単位で結果を memoize する。
+    /// `NSWorkspace.icon(forFile:)` と `FileManager.displayName(atPath:)` は OS-level I/O で、
+    /// popover open / 環境設定タブ表示の都度に 10-20 個のアプリ分繰り返し評価されていた。
+    /// Kura プロセスのライフタイム中はアプリの更新/再インストールは稀で、起きた場合は
+    /// Kura 再起動で次回 lookup から新値が乗るため、明示的な invalidation は行わない。
+    /// `NSCache` は内部 lock 付きの thread-safe コンテナで、メモリプレッシャー時には自動 evict されるため
+    /// 上限管理も不要 (典型 20-30 アプリ程度ならそもそも evict 対象にはならない)。
     static func lookupInfo(bundleId: String) -> (icon: NSImage?, name: String) {
+        let key = bundleId as NSString
+        if let cached = infoCache.object(forKey: key) {
+            return (cached.icon, cached.name)
+        }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else {
+            // urlForApplication が nil = アプリ未インストール。Kura セッション中にユーザーが
+            // 後からインストールした場合に拾い直せるよう、ここはキャッシュしない。
+            // urlForApplication 単体は LaunchServices の軽い lookup なのでミス時コストは小さい。
             return (nil, bundleId)
         }
         let icon = NSWorkspace.shared.icon(forFile: url.path)
         let name = FileManager.default.displayName(atPath: url.path)
+        infoCache.setObject(LookupInfoEntry(icon: icon, name: name), forKey: key)
         return (icon, name)
     }
+
+    /// `NSCache` は class type を要求するため、(icon, name) を保持する小さなラッパー。
+    private final class LookupInfoEntry {
+        let icon: NSImage?
+        let name: String
+        init(icon: NSImage?, name: String) {
+            self.icon = icon
+            self.name = name
+        }
+    }
+
+    private static let infoCache: NSCache<NSString, LookupInfoEntry> = NSCache()
 
     /// アプリ再起動で pid が変われば AX 要素も別物になるため、pid も同値判定に含める。
     /// （bundleId のみで一致判定すると、再起動後も古い pid の AppNode が再利用されて AX 走査が失敗する）
