@@ -390,6 +390,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         if !isFolded, let vc = popover.contentViewController as? KuraViewController {
             vc.setTargets(visibleApps)
         }
+        // warmup scan 完了前 (0.1/2/5/10s の delay 中) に「環境設定…」を開かれていた場合、
+        // showPreferences は `lastScanResult = []` で setScanResult を呼んでしまい
+        // 「対象アプリ」タブが空表示で固定される (ウィンドウを閉じて開き直すまで治らない)。
+        // ここで visible なら最新 cache を再注入してその UX 不具合を解消する。
+        if let prefs = preferencesWindowController, prefs.window?.isVisible == true {
+            prefs.setScanResult(lastScanResult)
+        }
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
