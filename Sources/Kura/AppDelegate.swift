@@ -20,11 +20,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// VC への `setTargets` 直前に `visibleApps` 経由で除外を適用する。
     private var lastScanResult: [StatusBarApp] = []
 
-    /// `lastScanResult` から除外設定を適用した popover 表示対象。
-    /// AppOrderStore.applied → AppExclusionStore.filtered の順で適用される
-    /// (lastScanResult が AppOrderStore.applied 済みなので、ここでは filter だけ)。
-    private var visibleApps: [StatusBarApp] {
-        AppExclusionStore.filtered(lastScanResult)
+    /// `lastScanResult` (AppOrderStore.applied 済み) に除外設定を適用した popover 表示対象の cache。
+    /// popover の read 経路で重複 filter を避けるため stored で持ち、`lastScanResult` 変更時 +
+    /// 除外設定変更時に `recomputeVisibleApps` で更新する。
+    private var visibleApps: [StatusBarApp] = []
+
+    /// `visibleApps` を最新の `lastScanResult` + 除外設定で再計算する。
+    /// 呼び出し責務: applyScanResult / onReorder (`lastScanResult` 更新直後) +
+    /// handlePreferencesDidChange (除外設定変更受信時)。
+    private func recomputeVisibleApps() {
+        visibleApps = AppExclusionStore.filtered(lastScanResult)
     }
     private var scanTask: Task<Void, Never>?
     /// 古い scan 完了が新しい結果を上書きしないよう世代管理する。
@@ -201,10 +206,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         // ホットキー再登録。差分判定は HotKeyManager.update 内部で行うので、無関係な通知 (symbol 変更等) でも安全に no-op。
         let hotKey = PreferencesStore.hotKey
         hotKeyManager?.update(keyCode: hotKey.keyCode, modifiers: hotKey.modifiers)
-        // 除外リスト (`AppExclusionStore`) 変更時に popover の表示を再フィルタで更新する。
-        // 環境設定ウィンドウから除外切り替え時、popover が開いていれば即時反映。
-        // 通常は環境設定がフォアグラウンドで popover は閉じているが、念のための復帰経路。
-        // scan は走らせない (除外切り替えに AX 走査は不要)。
+        // 除外リスト変更時に popover の表示を再フィルタで更新する (scan は走らせない)。
+        // 通常は環境設定がフォアグラウンドで popover は閉じているが、開いていれば即時反映する。
+        // 他キー (symbol/foldOnLaunch/launchAtLogin/hotKey) からも通知が飛ぶが filter のみで idempotent。
+        recomputeVisibleApps()
         if !isFolded, popover.isShown, let vc = popover.contentViewController as? KuraViewController {
             vc.setTargets(visibleApps)
         }
@@ -295,6 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
             // scan が並走していても applyScanResult 側で AppOrderStore.load() を読み直すので
             // ここで保存と cache 更新を MainActor 上で原子的に済ませれば順序が逆戻りすることはない。
             self.lastScanResult = AppOrderStore.applied(to: self.lastScanResult)
+            self.recomputeVisibleApps()
         }
         vc.foldController = self
         popover.contentViewController = vc
@@ -372,6 +378,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
                 failedBundleIds.contains($0.bundleIdentifier) && !successBundles.contains($0.bundleIdentifier)
             }
             lastScanResult = AppOrderStore.applied(to: apps + preservedFromCache)
+            recomputeVisibleApps()
             // 一時失敗が残っている間は warmup を停止しない（起動直後の AX 不安定状態で
             // キャッシュ未確立のまま打ち切るのを防ぐ）。
             if failedBundleIds.isEmpty {

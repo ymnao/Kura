@@ -19,6 +19,9 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     /// 一覧の空状態メッセージ。AX 走査前 / 蔵対象アプリがない場合に表示する。
     private var appsEmptyLabel: NSTextField!
     private var hotKeyRecorder: HotKeyRecorderView!
+    /// 起動していない除外アプリの icon を background で逆引きする Task。
+    /// setScanResult が連続して呼ばれた際に前回をキャンセルする (#15)。
+    private var lazyIconTask: Task<Void, Never>?
 
     convenience init() {
         // `.miniaturizable` を含めない: accessory app は Dock アイコンを持たないため、
@@ -39,14 +42,10 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         // showWindow を経由しない経路 (NSWindow restoration 等) でも UI が初期値で残らないよう、
         // ここでも初期値を流し込む。showWindow も冒頭で reloadFromStore を呼ぶが idempotent。
         reloadFromStore()
-        // 除外切り替えで自分が post した通知も拾い、ウィンドウ表示中に再 reload する。
-        // (チェック切り替え → AppExclusionStore.save → post → reloadAppsTable で UI が真値に追従)
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handlePreferencesDidChange),
-            name: .kuraPreferencesDidChange,
-            object: nil
-        )
+        // `.kuraPreferencesDidChange` は購読しない: 現状 AppExclusionStore.setExcluded を
+        // 呼ぶ writer は onCheckChanged 経路のみで、その場で updateRowExclusion が差分 reload
+        // する。将来 URL handler / リセットボタン等の外部 writer が増えた場合は、ここで
+        // 再購読して全件再計算経路を復活させる必要がある (table は古いまま固定されてしまうため)。
         // AppDelegate の scan 完了通知を購読。warmup scan (0.1/2/5/10s) 完了前にウィンドウを
         // 開かれて「対象アプリ」タブが空表示で固定される問題 (#13) を解消するため、scan が
         // 確定したタイミングで該当タブを最新化する。
@@ -56,10 +55,22 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
             name: .kuraDidCompleteScan,
             object: nil
         )
+        // controller は window close で release されない (`isReleasedWhenClosed = false`) ため
+        // deinit ではなく willClose で lazyIconTask を畳む: 閉じた後に icon を取得しても
+        // 反映先 (table) が見えていないので無駄な disk I/O / actor hop だけが残るのを防ぐ。
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWindowWillClose(_:)),
+            name: NSWindow.willCloseNotification,
+            object: window
+        )
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        // lazyIconTask の cancel は handleWindowWillClose が担当する。
+        // controller は AppDelegate に保持され `isReleasedWhenClosed = false` のため、
+        // deinit はプロセス終了時にしか fire せず、ここで cancel しても観察可能な効果がない。
     }
 
     private func buildContent() {
@@ -263,8 +274,10 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     /// 表示行 = 「現在 scan で見えているアプリ」+「除外済みだが scan に出ていない bundleId」の union。
     /// 後者を含めることで、起動していない除外アプリも一覧に表示でき、除外解除が可能になる。
     func setScanResult(_ apps: [StatusBarApp]) {
-        displayedApps = buildDisplayedApps(scanResult: apps)
+        let built = buildDisplayedApps(scanResult: apps)
+        displayedApps = built.rows
         reloadAppsTable()
+        fetchLazyIcons(for: built.lazyBundles)
     }
 
     private func reloadAppsTable() {
@@ -273,17 +286,20 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         appsEmptyLabel.isHidden = !displayedApps.isEmpty
     }
 
-    private func buildDisplayedApps(scanResult: [StatusBarApp]) -> [DisplayedApp] {
+    /// 表示行と「placeholder で出した bundleId」(後追いで lookupInfo する対象) をまとめて返す。
+    /// 両者を分離して返すことで、caller は再度 displayedApps を走査して icon==nil 行を抽出する
+    /// 必要がなくなる (#15 の lazy fetch ステップで重複 pass を避ける)。
+    private func buildDisplayedApps(scanResult: [StatusBarApp]) -> (rows: [DisplayedApp], lazyBundles: [String]) {
         // excluded を mutable な「未消費」集合として扱い、scan で見つけたものから順に remove する。
         // - remove の戻り値 (削除された element / nil) で「除外対象だったか」を bool 化して isExcluded に詰める
         // - ループ後に残った要素 = 「除外済みだが scan に出ていない bundleId」= 末尾補完対象
         // これにより seen Set + 2 度の Set 走査 (subtracting) を避ける。
         var unseenExcluded = AppExclusionStore.load()
-        var result: [DisplayedApp] = []
-        result.reserveCapacity(scanResult.count + unseenExcluded.count)
+        var rows: [DisplayedApp] = []
+        rows.reserveCapacity(scanResult.count + unseenExcluded.count)
         for app in scanResult {
             let wasExcluded = unseenExcluded.remove(app.bundleIdentifier) != nil
-            result.append(DisplayedApp(
+            rows.append(DisplayedApp(
                 bundleId: app.bundleIdentifier,
                 name: app.name,
                 icon: app.icon,
@@ -292,17 +308,47 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         }
         // 残った unseenExcluded = アプリが起動していない or 蔵より右にいて scan 対象外、等。
         // 並び順を安定させるため sorted する (Set の列挙順は非決定的)。
-        // bundleId からの (icon, name) 逆引きは StatusBarApp.lookupInfo に集約済み。
-        for bundleId in unseenExcluded.sorted() {
-            let info = StatusBarApp.lookupInfo(bundleId: bundleId)
-            result.append(DisplayedApp(
+        // ここでは lookupInfo を呼ばず placeholder (icon=nil, name=bundleId) を即時返す:
+        // lookupInfo は内部で NSWorkspace.urlForApplication / icon(forFile:) /
+        // FileManager.displayName(atPath:) を呼び disk I/O を起こすため、除外リストが育った
+        // ユーザーで MainActor が jank する (#15)。
+        // 実値は setScanResult 末尾で kick する fetchLazyIcons で background Task が逆引きし、
+        // 行を差分 reload する。
+        let lazyBundles = unseenExcluded.sorted()
+        for bundleId in lazyBundles {
+            rows.append(DisplayedApp(
                 bundleId: bundleId,
-                name: info.name,
-                icon: info.icon,
+                name: bundleId,
+                icon: nil,
                 isExcluded: true
             ))
         }
-        return result
+        return (rows, lazyBundles)
+    }
+
+    /// 指定 bundleId 群の icon/name を background で逆引きし、取得できた行を差分 reload する。
+    /// 連続 setScanResult (warmup 中の handleScanCompleted 複数回など) では前回 Task を
+    /// cancel して新 Task を kick する。
+    private func fetchLazyIcons(for bundleIds: [String]) {
+        lazyIconTask?.cancel()
+        guard !bundleIds.isEmpty else { return }
+        lazyIconTask = Task.detached(priority: .userInitiated) { [weak self] in
+            for bundleId in bundleIds {
+                if Task.isCancelled { return }
+                // background スレッドで lookupInfo を呼んで NSCache を温める
+                // (戻り値の NSImage は MainActor 側で再 lookup して取り直すため捨てる)。
+                _ = StatusBarApp.lookupInfo(bundleId: bundleId)
+                await self?.applyLazyIcon(bundleId: bundleId)
+            }
+        }
+    }
+
+    /// background fetch で温まった NSCache から MainActor 上で再 lookup (cache hit) し、
+    /// 対象行の icon/name を差分 reload する。NSImage の Sendable を跨がせないために
+    /// lookupInfo を 2 度呼ぶ (2 度目は cache hit で軽量)。
+    private func applyLazyIcon(bundleId: String) {
+        let info = StatusBarApp.lookupInfo(bundleId: bundleId)
+        mutateDisplayedApp(bundleId: bundleId) { $0.with(name: info.name, icon: info.icon) }
     }
 
     /// ウィンドウ表示直前に store の最新値で UI を同期する。
@@ -324,19 +370,28 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         }
     }
 
-    @objc private func handlePreferencesDidChange() {
-        // 設定値が変わったタイミングで table の isExcluded を真値で塗り直す。
-        // (チェック切り替え → AppExclusionStore.save → post でここに戻ってくる)
-        // scanResult 自体は変わっていないので bundleId/name/icon は保持したまま isExcluded だけ更新する。
-        // 「除外済みだが現在 displayedApps にない bundleId」を足す処理はここではしない:
-        // それは次回 setScanResult (環境設定ウィンドウを開き直し) で補完される。
-        // ここで足してしまうと scan が空の瞬間に除外解除した行が消えるレースを起こす。
-        let excluded = AppExclusionStore.load()
-        displayedApps = displayedApps.map {
-            DisplayedApp(bundleId: $0.bundleId, name: $0.name, icon: $0.icon,
-                         isExcluded: excluded.contains($0.bundleId))
-        }
-        reloadAppsTable()
+    /// 単一行の除外状態を差分更新する。`onCheckChanged` callback が直接呼び出す経路で、
+    /// 全件 map + reloadData の代わりに対象行のみ差分 reload する。
+    /// `displayedApps[row]` を真値で更新しないと cell view 再利用 (スクロール後の再描画) で
+    /// 古い isExcluded が読まれる。
+    private func updateRowExclusion(bundleId: String, isExcluded: Bool) {
+        mutateDisplayedApp(bundleId: bundleId) { $0.with(isExcluded: isExcluded) }
+    }
+
+    /// `displayedApps` の単一行を bundleId で探して `transform` で置き換え、その行だけ差分 reload する。
+    /// `updateRowExclusion` (除外切替) と `applyLazyIcon` (background fetch 完了) の
+    /// 共通骨格を集約する: 行探索 → 行置換 → reloadData(forRowIndexes:) の 3 ステップ。
+    private func mutateDisplayedApp(bundleId: String, transform: (DisplayedApp) -> DisplayedApp) {
+        guard let row = displayedApps.firstIndex(where: { $0.bundleId == bundleId }) else { return }
+        displayedApps[row] = transform(displayedApps[row])
+        appsTableView?.reloadData(
+            forRowIndexes: IndexSet(integer: row),
+            columnIndexes: IndexSet(integer: 0)
+        )
+    }
+
+    @objc private func handleWindowWillClose(_ notification: Notification) {
+        lazyIconTask?.cancel()
     }
 
     @objc private func handleScanCompleted(_ notification: Notification) {
@@ -400,10 +455,12 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         }
         // configure 内で bundleId / 状態を更新するため、callback も毎回張り直す
         // (cell view 再利用で違う行に流用されるため、closure 内の bundleId が古いままにならないように)。
-        view.onCheckChanged = { bundleId, isChecked in
+        view.onCheckChanged = { [weak self] bundleId, isChecked in
             // チェック ON = 蔵に入れる = excluded false
             // チェック OFF = 蔵に入れない = excluded true
-            AppExclusionStore.setExcluded(bundleId, excluded: !isChecked)
+            let isExcluded = !isChecked
+            AppExclusionStore.setExcluded(bundleId, excluded: isExcluded)
+            self?.updateRowExclusion(bundleId: bundleId, isExcluded: isExcluded)
         }
         view.configure(with: displayedApps[row])
         return view
@@ -416,6 +473,16 @@ private struct DisplayedApp {
     let name: String
     let icon: NSImage?
     let isExcluded: Bool
+
+    /// background fetch で確定した (name, icon) で差し替えた copy を返す。
+    func with(name: String, icon: NSImage?) -> DisplayedApp {
+        DisplayedApp(bundleId: bundleId, name: name, icon: icon, isExcluded: isExcluded)
+    }
+
+    /// チェック切り替えで除外状態だけ差し替えた copy を返す。
+    func with(isExcluded: Bool) -> DisplayedApp {
+        DisplayedApp(bundleId: bundleId, name: name, icon: icon, isExcluded: isExcluded)
+    }
 }
 
 /// NSTableView の 1 行を構成する view。チェックボックス + アイコン + アプリ名を NSStackView で横並びに。
@@ -466,8 +533,10 @@ private final class AppRowView: NSTableCellView {
         currentBundleId = app.bundleId
         checkbox.state = app.isExcluded ? .off : .on
         // 起動していない除外アプリ等で icon が nil の場合は placeholder を出す (空白だと違和感がある)。
-        iconView.image = app.icon ?? NSImage(systemSymbolName: "questionmark.app.dashed",
-                                             accessibilityDescription: "未取得")
+        // placeholder (SF Symbol) も nil の場合は描画済みテキストフォールバックに落とす (#17):
+        // AppDelegate.updateStatusIcon の「蔵」テキストフォールバックと整合的にし、極小確率の
+        // SF Symbols カタログ変動 / グラフィックス初期化失敗で 18x18 の空白が残るのを防ぐ。
+        iconView.image = app.icon ?? Self.placeholderIcon
         nameLabel.stringValue = app.name
     }
 
@@ -475,4 +544,29 @@ private final class AppRowView: NSTableCellView {
         guard let id = currentBundleId else { return }
         onCheckChanged?(id, sender.state == .on)
     }
+
+    /// 3 段フォールバック: SF Symbol → 描画済み "?" テキスト。
+    /// init 後の最初の参照で 1 度だけ評価され、以降は cached NSImage を返す。
+    private static let placeholderIcon: NSImage = {
+        if let symbol = NSImage(systemSymbolName: "questionmark.app.dashed",
+                                accessibilityDescription: "未取得") {
+            return symbol
+        }
+        let size = NSSize(width: 18, height: 18)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 14, weight: .medium),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+        let text = "?" as NSString
+        let textSize = text.size(withAttributes: attrs)
+        let point = NSPoint(
+            x: (size.width - textSize.width) / 2,
+            y: (size.height - textSize.height) / 2
+        )
+        text.draw(at: point, withAttributes: attrs)
+        image.unlockFocus()
+        return image
+    }()
 }
