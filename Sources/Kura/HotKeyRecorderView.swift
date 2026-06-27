@@ -180,15 +180,25 @@ final class HotKeyRecorderView: NSView {
 
     // MARK: - 変換ヘルパー
 
+    /// modifier 4 種の対応表。`carbonModifiers` の Carbon raw 集約と
+    /// `displayString` の glyph 列挙の両方で使う唯一の真実の源。
+    /// 配列順序は macOS 標準の表記順 (⌃⌥⇧⌘) を定義する：
+    /// `carbonModifiers` は bitwise OR なので順序非依存、`displayString` は順序がそのまま出力に出る。
+    private static let modifierTable: [(flag: NSEvent.ModifierFlags, glyph: String, carbon: Int)] = [
+        (.control, "⌃", controlKey),
+        (.option,  "⌥", optionKey),
+        (.shift,   "⇧", shiftKey),
+        (.command, "⌘", cmdKey),
+    ]
+
     /// NSEvent.ModifierFlags を Carbon `RegisterEventHotKey` 用の bitwise OR に変換する。
     /// device-independent な `.command/.option/.control/.shift` だけを採用する
     /// (function key flag や capsLock は Carbon 側に対応する flag がない / ホットキーには不適切)。
     static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
         var result: UInt32 = 0
-        if flags.contains(.command) { result |= UInt32(cmdKey) }
-        if flags.contains(.option)  { result |= UInt32(optionKey) }
-        if flags.contains(.control) { result |= UInt32(controlKey) }
-        if flags.contains(.shift)   { result |= UInt32(shiftKey) }
+        for (flag, _, carbon) in modifierTable where flags.contains(flag) {
+            result |= UInt32(carbon)
+        }
         return result
     }
 
@@ -200,10 +210,9 @@ final class HotKeyRecorderView: NSView {
         charactersIgnoringModifiers: String?
     ) -> String {
         var result = ""
-        if modifierFlags.contains(.control) { result += "⌃" }
-        if modifierFlags.contains(.option)  { result += "⌥" }
-        if modifierFlags.contains(.shift)   { result += "⇧" }
-        if modifierFlags.contains(.command) { result += "⌘" }
+        for (flag, glyph, _) in modifierTable where modifierFlags.contains(flag) {
+            result += glyph
+        }
         if let special = specialKeyName(forKeyCode: Int(keyCode)) {
             result += special
         } else if let chars = charactersIgnoringModifiers, !chars.isEmpty {
