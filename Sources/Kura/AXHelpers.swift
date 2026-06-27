@@ -5,8 +5,12 @@ enum AXHelpers {
     /// 他アプリの AX 呼び出しのタイムアウト。
     /// 折りたたみコミット前に位置 scan + 全 AppNode メニュー詳細 scan の完了を await するため、
     /// 1 つのアプリが timeout 限界まで粘ると fold レイテンシに直結する。実機では応答時間が
-    /// ms オーダーなので 0.5 秒で十分。極端に遅い AX アプリは元々 transient failure 扱いで
-    /// fold 自体ブロックされるので、ここを更に短くしても挙動は変わらない（既に守られている）。
+    /// ms オーダーなので 0.5 秒で十分。
+    /// timeout 短縮の副作用: top-level (`AXExtrasMenuBar` / `AXChildren`) が `cannotComplete`
+    /// を返した場合は `MenuBarLayoutScanner` 側で `.noStatusItems` に倒すため、対象アプリから
+    /// silent に外れる (fold はブロックされない)。一方 per-item の `kAXPositionAttribute` で
+    /// `cannotComplete` が出ると `.transientFailure` → `failedBundleIds` 入りで fold をブロックする。
+    /// 0.5-1.0s 帯のアプリで両者が起きうるため、実機計測 (foldTiming NSLog) で支障が出たら戻す。
     static let messagingTimeout: Float = 0.5
 
     /// 属性値を取り出す（生 CFTypeRef）。

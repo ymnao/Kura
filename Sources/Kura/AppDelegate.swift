@@ -498,9 +498,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
             let detailEnd = DispatchTime.now()
             guard let self = self else { return }
             self.isCommittingFold = false
-            let layoutMs = Double(layoutEnd.uptimeNanoseconds - foldStart.uptimeNanoseconds) / 1_000_000
-            let detailMs = Double(detailEnd.uptimeNanoseconds - layoutEnd.uptimeNanoseconds) / 1_000_000
-            NSLog("[Kura] foldTiming %@ layout=%.0fms detail=%.0fms", triggerLabel, layoutMs, detailMs)
             // 最新の layout scan が .items かつ failedBundleIds が空（= 全アプリで scan 成功）の場合のみ
             // folded を許可。部分失敗 (failedBundleIds に bundleId が積まれている) では、その bundle が
             // 初回 scan なら cache 未確立で folded 後に操作不能になるため、ブロック。
@@ -510,6 +507,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
             } else {
                 layoutOk = false
             }
+            // 計測ログは success/fail 双方で出す (失敗時の latency も baseline として有用)。
+            // ok ラベルで成功/失敗を区別できるよう format に含める。
+            let layoutMs = Double(layoutEnd.uptimeNanoseconds - foldStart.uptimeNanoseconds) / 1_000_000
+            let detailMs = Double(detailEnd.uptimeNanoseconds - layoutEnd.uptimeNanoseconds) / 1_000_000
+            let resultLabel = (layoutOk && detailScansOk) ? "ok" : "blocked"
+            NSLog("[Kura] foldTiming %@ %@ layout=%.0fms detail=%.0fms",
+                  triggerLabel, resultLabel, layoutMs, detailMs)
             guard layoutOk, detailScansOk else {
                 if !silent {
                     self.showFoldUnavailableAlert(layoutOk: layoutOk, detailOk: detailScansOk)
