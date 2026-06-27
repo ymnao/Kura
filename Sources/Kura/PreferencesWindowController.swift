@@ -39,14 +39,6 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         // showWindow を経由しない経路 (NSWindow restoration 等) でも UI が初期値で残らないよう、
         // ここでも初期値を流し込む。showWindow も冒頭で reloadFromStore を呼ぶが idempotent。
         reloadFromStore()
-        // 除外切り替えで自分が post した通知も拾い、ウィンドウ表示中に再 reload する。
-        // (チェック切り替え → AppExclusionStore.save → post → reloadAppsTable で UI が真値に追従)
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handlePreferencesDidChange),
-            name: .kuraPreferencesDidChange,
-            object: nil
-        )
         // AppDelegate の scan 完了通知を購読。warmup scan (0.1/2/5/10s) 完了前にウィンドウを
         // 開かれて「対象アプリ」タブが空表示で固定される問題 (#13) を解消するため、scan が
         // 確定したタイミングで該当タブを最新化する。
@@ -324,19 +316,23 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         }
     }
 
-    @objc private func handlePreferencesDidChange() {
-        // 設定値が変わったタイミングで table の isExcluded を真値で塗り直す。
-        // (チェック切り替え → AppExclusionStore.save → post でここに戻ってくる)
-        // scanResult 自体は変わっていないので bundleId/name/icon は保持したまま isExcluded だけ更新する。
-        // 「除外済みだが現在 displayedApps にない bundleId」を足す処理はここではしない:
-        // それは次回 setScanResult (環境設定ウィンドウを開き直し) で補完される。
-        // ここで足してしまうと scan が空の瞬間に除外解除した行が消えるレースを起こす。
-        let excluded = AppExclusionStore.load()
-        displayedApps = displayedApps.map {
-            DisplayedApp(bundleId: $0.bundleId, name: $0.name, icon: $0.icon,
-                         isExcluded: excluded.contains($0.bundleId))
-        }
-        reloadAppsTable()
+    /// 単一行の除外状態を差分更新する。`onCheckChanged` callback が直接呼び出す経路で、
+    /// 全件 map + reloadData の代わりに対象行のみ差分 reload する。
+    /// `displayedApps[row]` を真値で更新しないと cell view 再利用 (スクロール後の再描画) で
+    /// 古い isExcluded が読まれる。
+    private func updateRowExclusion(bundleId: String, isExcluded: Bool) {
+        guard let row = displayedApps.firstIndex(where: { $0.bundleId == bundleId }) else { return }
+        let old = displayedApps[row]
+        displayedApps[row] = DisplayedApp(
+            bundleId: old.bundleId,
+            name: old.name,
+            icon: old.icon,
+            isExcluded: isExcluded
+        )
+        appsTableView?.reloadData(
+            forRowIndexes: IndexSet(integer: row),
+            columnIndexes: IndexSet(integer: 0)
+        )
     }
 
     @objc private func handleScanCompleted(_ notification: Notification) {
@@ -400,10 +396,12 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         }
         // configure 内で bundleId / 状態を更新するため、callback も毎回張り直す
         // (cell view 再利用で違う行に流用されるため、closure 内の bundleId が古いままにならないように)。
-        view.onCheckChanged = { bundleId, isChecked in
+        view.onCheckChanged = { [weak self] bundleId, isChecked in
             // チェック ON = 蔵に入れる = excluded false
             // チェック OFF = 蔵に入れない = excluded true
-            AppExclusionStore.setExcluded(bundleId, excluded: !isChecked)
+            let isExcluded = !isChecked
+            AppExclusionStore.setExcluded(bundleId, excluded: isExcluded)
+            self?.updateRowExclusion(bundleId: bundleId, isExcluded: isExcluded)
         }
         view.configure(with: displayedApps[row])
         return view
