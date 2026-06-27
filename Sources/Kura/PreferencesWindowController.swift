@@ -253,9 +253,15 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     /// 「対象アプリ」タブのデータソース。AppDelegate から showPreferences 時に注入される。
     /// 表示行 = 「現在 scan で見えているアプリ」+「除外済みだが scan に出ていない bundleId」の union。
     /// 後者を含めることで、起動していない除外アプリも一覧に表示でき、除外解除が可能になる。
+    /// 後者は disk I/O を伴うため placeholder で行を出した後、background Task で順次取得して
+    /// 該当行のみ差分 reload する (loadPendingIcons 経由)。
     func setScanResult(_ apps: [StatusBarApp]) {
-        displayedApps = buildDisplayedApps(scanResult: apps)
+        let (built, pendingBundleIds) = buildDisplayedApps(scanResult: apps)
+        displayedApps = built
         reloadAppsTable()
+        if !pendingBundleIds.isEmpty {
+            loadPendingIcons(pendingBundleIds)
+        }
     }
 
     private func reloadAppsTable() {
@@ -264,7 +270,7 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         appsEmptyLabel.isHidden = !displayedApps.isEmpty
     }
 
-    private func buildDisplayedApps(scanResult: [StatusBarApp]) -> [DisplayedApp] {
+    private func buildDisplayedApps(scanResult: [StatusBarApp]) -> (built: [DisplayedApp], pendingBundleIds: [String]) {
         // excluded を mutable な「未消費」集合として扱い、scan で見つけたものから順に remove する。
         // - remove の戻り値 (削除された element / nil) で「除外対象だったか」を bool 化して isExcluded に詰める
         // - ループ後に残った要素 = 「除外済みだが scan に出ていない bundleId」= 末尾補完対象
@@ -283,17 +289,45 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         }
         // 残った unseenExcluded = アプリが起動していない or 蔵より右にいて scan 対象外、等。
         // 並び順を安定させるため sorted する (Set の列挙順は非決定的)。
-        // bundleId からの (icon, name) 逆引きは StatusBarApp.lookupInfo に集約済み。
-        for bundleId in unseenExcluded.sorted() {
-            let info = StatusBarApp.lookupInfo(bundleId: bundleId)
+        // ここでは StatusBarApp.lookupInfo (disk I/O) を呼ばず、placeholder (icon=nil, name=bundleId) で
+        // 行を構築する。背景取得は呼び出し側 (setScanResult → loadPendingIcons) が担当。
+        let pendingBundleIds = Array(unseenExcluded.sorted())
+        for bundleId in pendingBundleIds {
             result.append(DisplayedApp(
                 bundleId: bundleId,
-                name: info.name,
-                icon: info.icon,
+                name: bundleId,
+                icon: nil,
                 isExcluded: true
             ))
         }
-        return result
+        return (result, pendingBundleIds)
+    }
+
+    /// 起動していない除外アプリの (icon, name) を background Task で順次取得し、取得完了時に
+    /// 該当行のみ MainActor で差分 reload する。NSWorkspace.icon(forFile:) と
+    /// FileManager.displayName(atPath:) は disk I/O を伴うため、MainActor をブロックしない。
+    /// 並走する setScanResult 呼び出しがあっても、`applyPendingIcon` 内の `firstIndex` 検索で
+    /// 「現在の displayedApps に当該 bundleId が存在するか」を見るため古い結果を踏まない。
+    private func loadPendingIcons(_ bundleIds: [String]) {
+        Task.detached(priority: .userInitiated) { [weak self] in
+            for bundleId in bundleIds {
+                let info = StatusBarApp.lookupInfo(bundleId: bundleId)
+                await self?.applyPendingIcon(bundleId: bundleId, name: info.name, icon: info.icon)
+            }
+        }
+    }
+
+    private func applyPendingIcon(bundleId: String, name: String, icon: NSImage?) {
+        guard let index = displayedApps.firstIndex(where: { $0.bundleId == bundleId }) else { return }
+        let prev = displayedApps[index]
+        displayedApps[index] = DisplayedApp(
+            bundleId: prev.bundleId,
+            name: name,
+            icon: icon,
+            isExcluded: prev.isExcluded
+        )
+        appsTableView.reloadData(forRowIndexes: IndexSet(integer: index),
+                                 columnIndexes: IndexSet(integer: 0))
     }
 
     /// ウィンドウ表示直前に store の最新値で UI を同期する。
@@ -448,9 +482,11 @@ private final class AppRowView: NSTableCellView {
     func configure(with app: DisplayedApp) {
         currentBundleId = app.bundleId
         checkbox.state = app.isExcluded ? .off : .on
-        // 起動していない除外アプリ等で icon が nil の場合は placeholder を出す (空白だと違和感がある)。
-        iconView.image = app.icon ?? NSImage(systemSymbolName: "questionmark.app.dashed",
-                                             accessibilityDescription: "未取得")
+        // 2 段階フォールバック: アプリ icon → SF Symbol → 「?」テキスト描画。
+        // macOS 14+ で `questionmark.app.dashed` が nil を返す確率は極めて低いが、
+        // 将来の SF Symbols カタログ変動で nil 返却された場合に 18x18 空白だけが残るのを避ける
+        // (AppDelegate.makeKuraIcon の「蔵」テキストフォールバックと同じ非対称解消)。
+        iconView.image = app.icon ?? Self.placeholderIcon
         nameLabel.stringValue = app.name
     }
 
@@ -458,4 +494,27 @@ private final class AppRowView: NSTableCellView {
         guard let id = currentBundleId else { return }
         onCheckChanged?(id, sender.state == .on)
     }
+
+    /// `app.icon` が nil の行に出す placeholder。SF Symbol が取れれば symbol、
+    /// それも nil なら 18x18 の NSImage に「?」を描画したものを返す (空白行を避ける最後の砦)。
+    /// class load 時に 1 回だけ評価され、以降は cache 値を全行で共用する (NSImage は read-only に使う)。
+    private static let placeholderIcon: NSImage = {
+        if let symbol = NSImage(systemSymbolName: "questionmark.app.dashed",
+                                accessibilityDescription: "未取得") {
+            return symbol
+        }
+        let size = NSSize(width: 18, height: 18)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        let text = NSAttributedString(string: "?", attributes: [
+            .font: NSFont.systemFont(ofSize: 14, weight: .medium),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ])
+        let bounds = text.boundingRect(with: size, options: [])
+        text.draw(at: NSPoint(x: (size.width - bounds.width) / 2,
+                              y: (size.height - bounds.height) / 2))
+        image.unlockFocus()
+        image.accessibilityDescription = "未取得"
+        return image
+    }()
 }
