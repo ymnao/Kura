@@ -23,9 +23,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     /// `lastScanResult` から除外設定を適用した popover 表示対象。
     /// AppOrderStore.applied → AppExclusionStore.filtered の順で適用される
     /// (lastScanResult が AppOrderStore.applied 済みなので、ここでは filter だけ)。
+    /// popover を 1 回開く間に 3 経路 (`applyScanResult` / `togglePopover` / `handlePreferencesDidChange`)
+    /// から読まれるため、`AppExclusionStore.load` (UserDefaults read + Set 化) を `excludedCache` で
+    /// memoize して 2 回目以降は filter のみ走らせる。
     private var visibleApps: [StatusBarApp] {
-        AppExclusionStore.filtered(lastScanResult)
+        let excluded: Set<String>
+        if let cached = excludedCache {
+            excluded = cached
+        } else {
+            excluded = AppExclusionStore.load()
+            excludedCache = excluded
+        }
+        guard !excluded.isEmpty else { return lastScanResult }
+        return lastScanResult.filter { !excluded.contains($0.bundleIdentifier) }
     }
+
+    /// `visibleApps` 用の除外リスト cache。
+    /// `.kuraPreferencesDidChange` を受けた `handlePreferencesDidChange` で nil に戻し、
+    /// 次回 `visibleApps` 読み出しで `AppExclusionStore.load` から再構築する。
+    private var excludedCache: Set<String>?
     private var scanTask: Task<Void, Never>?
     /// 古い scan 完了が新しい結果を上書きしないよう世代管理する。
     /// startScan で +1、applyScanResult で世代一致のみ反映。
@@ -194,6 +210,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
     }
 
     @objc private func handlePreferencesDidChange() {
+        // 除外リスト変更を含む可能性があるので invalidate。次回 `visibleApps` 読み出しで
+        // `AppExclusionStore.load` から再構築される。
+        // 他種の通知 (symbol / foldOnLaunch / launchAtLogin / hotKey 変更) でも nil 化されるが、
+        // 次の load は UserDefaults in-memory cache に乗っているので追加コストは小さい。
+        excludedCache = nil
         rebuildIconCache()
         // フォールバック状態 (SF Symbol load 失敗) から復帰できるよう、symbol 不変でも updateStatusIcon を呼ぶ。
         // updateStatusIcon は cache を read するだけなので低コスト。

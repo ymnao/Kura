@@ -39,18 +39,6 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         // showWindow を経由しない経路 (NSWindow restoration 等) でも UI が初期値で残らないよう、
         // ここでも初期値を流し込む。showWindow も冒頭で reloadFromStore を呼ぶが idempotent。
         reloadFromStore()
-        // 除外切り替えで自分が post した通知も拾い、ウィンドウ表示中に再 reload する。
-        // (チェック切り替え → AppExclusionStore.save → post → reloadAppsTable で UI が真値に追従)
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handlePreferencesDidChange),
-            name: .kuraPreferencesDidChange,
-            object: nil
-        )
-    }
-
-    deinit {
-        NotificationCenter.default.removeObserver(self)
     }
 
     private func buildContent() {
@@ -315,21 +303,6 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         }
     }
 
-    @objc private func handlePreferencesDidChange() {
-        // 設定値が変わったタイミングで table の isExcluded を真値で塗り直す。
-        // (チェック切り替え → AppExclusionStore.save → post でここに戻ってくる)
-        // scanResult 自体は変わっていないので bundleId/name/icon は保持したまま isExcluded だけ更新する。
-        // 「除外済みだが現在 displayedApps にない bundleId」を足す処理はここではしない:
-        // それは次回 setScanResult (環境設定ウィンドウを開き直し) で補完される。
-        // ここで足してしまうと scan が空の瞬間に除外解除した行が消えるレースを起こす。
-        let excluded = AppExclusionStore.load()
-        displayedApps = displayedApps.map {
-            DisplayedApp(bundleId: $0.bundleId, name: $0.name, icon: $0.icon,
-                         isExcluded: excluded.contains($0.bundleId))
-        }
-        reloadAppsTable()
-    }
-
     @objc private func symbolChanged(_ sender: NSPopUpButton) {
         guard let symbol = sender.selectedItem?.representedObject as? KuraSymbol else { return }
         PreferencesStore.symbol = symbol
@@ -383,13 +356,32 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         }
         // configure 内で bundleId / 状態を更新するため、callback も毎回張り直す
         // (cell view 再利用で違う行に流用されるため、closure 内の bundleId が古いままにならないように)。
-        view.onCheckChanged = { bundleId, isChecked in
+        view.onCheckChanged = { [weak self] bundleId, isChecked in
             // チェック ON = 蔵に入れる = excluded false
             // チェック OFF = 蔵に入れない = excluded true
             AppExclusionStore.setExcluded(bundleId, excluded: !isChecked)
+            // 該当行のみ差分 reload で UI を真値に同期する。bundleId から index を逆引きするのは、
+            // cell view 再利用で同じ AppRowView が違う row に流用されるため、closure キャプチャの
+            // row が古くなる可能性があるため (configure ごとに callback を張り直しているが念のため安全側)。
+            self?.reloadRow(bundleId: bundleId, isExcluded: !isChecked)
         }
         view.configure(with: displayedApps[row])
         return view
+    }
+
+    /// `bundleId` 行の isExcluded を更新し、その行だけ差分 reload する。
+    /// 行が見つからない場合 (環境設定を閉じている間に setScanResult が呼ばれて消えた等) は何もしない。
+    private func reloadRow(bundleId: String, isExcluded: Bool) {
+        guard let index = displayedApps.firstIndex(where: { $0.bundleId == bundleId }) else { return }
+        let prev = displayedApps[index]
+        displayedApps[index] = DisplayedApp(
+            bundleId: prev.bundleId,
+            name: prev.name,
+            icon: prev.icon,
+            isExcluded: isExcluded
+        )
+        appsTableView.reloadData(forRowIndexes: IndexSet(integer: index),
+                                 columnIndexes: IndexSet(integer: 0))
     }
 }
 
