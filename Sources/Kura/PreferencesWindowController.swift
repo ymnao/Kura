@@ -51,6 +51,15 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
             name: .kuraDidCompleteScan,
             object: nil
         )
+        // controller は window close で release されない (`isReleasedWhenClosed = false`) ため
+        // deinit ではなく willClose で lazyIconTask を畳む: 閉じた後に icon を取得しても
+        // 反映先 (table) が見えていないので無駄な disk I/O / actor hop だけが残るのを防ぐ。
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWindowWillClose(_:)),
+            name: NSWindow.willCloseNotification,
+            object: window
+        )
     }
 
     deinit {
@@ -259,9 +268,10 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     /// 表示行 = 「現在 scan で見えているアプリ」+「除外済みだが scan に出ていない bundleId」の union。
     /// 後者を含めることで、起動していない除外アプリも一覧に表示でき、除外解除が可能になる。
     func setScanResult(_ apps: [StatusBarApp]) {
-        displayedApps = buildDisplayedApps(scanResult: apps)
+        let built = buildDisplayedApps(scanResult: apps)
+        displayedApps = built.rows
         reloadAppsTable()
-        fetchLazyIconsForUnseenExcluded(scanResult: apps)
+        fetchLazyIcons(for: built.lazyBundles)
     }
 
     private func reloadAppsTable() {
@@ -270,17 +280,20 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         appsEmptyLabel.isHidden = !displayedApps.isEmpty
     }
 
-    private func buildDisplayedApps(scanResult: [StatusBarApp]) -> [DisplayedApp] {
+    /// 表示行と「placeholder で出した bundleId」(後追いで lookupInfo する対象) をまとめて返す。
+    /// 両者を分離して返すことで、caller は再度 displayedApps を走査して icon==nil 行を抽出する
+    /// 必要がなくなる (#15 の lazy fetch ステップで重複 pass を避ける)。
+    private func buildDisplayedApps(scanResult: [StatusBarApp]) -> (rows: [DisplayedApp], lazyBundles: [String]) {
         // excluded を mutable な「未消費」集合として扱い、scan で見つけたものから順に remove する。
         // - remove の戻り値 (削除された element / nil) で「除外対象だったか」を bool 化して isExcluded に詰める
         // - ループ後に残った要素 = 「除外済みだが scan に出ていない bundleId」= 末尾補完対象
         // これにより seen Set + 2 度の Set 走査 (subtracting) を避ける。
         var unseenExcluded = AppExclusionStore.load()
-        var result: [DisplayedApp] = []
-        result.reserveCapacity(scanResult.count + unseenExcluded.count)
+        var rows: [DisplayedApp] = []
+        rows.reserveCapacity(scanResult.count + unseenExcluded.count)
         for app in scanResult {
             let wasExcluded = unseenExcluded.remove(app.bundleIdentifier) != nil
-            result.append(DisplayedApp(
+            rows.append(DisplayedApp(
                 bundleId: app.bundleIdentifier,
                 name: app.name,
                 icon: app.icon,
@@ -293,37 +306,30 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
         // lookupInfo は内部で NSWorkspace.urlForApplication / icon(forFile:) /
         // FileManager.displayName(atPath:) を呼び disk I/O を起こすため、除外リストが育った
         // ユーザーで MainActor が jank する (#15)。
-        // 実値は setScanResult 末尾で kick する fetchLazyIconsForUnseenExcluded で
-        // background Task が逆引きし、行を差分 reload する。
-        for bundleId in unseenExcluded.sorted() {
-            result.append(DisplayedApp(
+        // 実値は setScanResult 末尾で kick する fetchLazyIcons で background Task が逆引きし、
+        // 行を差分 reload する。
+        let lazyBundles = unseenExcluded.sorted()
+        for bundleId in lazyBundles {
+            rows.append(DisplayedApp(
                 bundleId: bundleId,
                 name: bundleId,
                 icon: nil,
                 isExcluded: true
             ))
         }
-        return result
+        return (rows, lazyBundles)
     }
 
-    /// scan に出ていない除外済み bundleId の icon/name を background で逆引きし、
-    /// 取得できた行を差分 reload する。lookupInfo は内部 NSCache で memoize されるため
-    /// 連続実行でも 2 回目以降は cache hit、初回のみ disk I/O を負担する。
-    /// 連続 setScanResult (warmup 中の handleScanCompleted 複数回など) では前回 Task を
-    /// cancel して新 Task を kick する (途中 cancel されても lookupInfo の cache は残るため
-    /// 次回 Task は実質 free)。
-    private func fetchLazyIconsForUnseenExcluded(scanResult: [StatusBarApp]) {
-        let scanBundles = Set(scanResult.map { $0.bundleIdentifier })
-        let lazyBundles = displayedApps
-            .map { $0.bundleId }
-            .filter { !scanBundles.contains($0) }
+    /// 指定 bundleId 群の icon/name を background で逆引きし、取得できた行を差分 reload する。
+    /// lookupInfo は内部 NSCache で memoize されるため連続実行でも 2 回目以降は cache hit、
+    /// 初回のみ disk I/O を負担する。連続 setScanResult (warmup 中の handleScanCompleted
+    /// 複数回など) では前回 Task を cancel して新 Task を kick する (途中 cancel されても
+    /// lookupInfo の cache は残るため次回 Task は実質 free)。
+    private func fetchLazyIcons(for bundleIds: [String]) {
         lazyIconTask?.cancel()
-        guard !lazyBundles.isEmpty else {
-            lazyIconTask = nil
-            return
-        }
+        guard !bundleIds.isEmpty else { return }
         lazyIconTask = Task.detached(priority: .userInitiated) { [weak self] in
-            for bundleId in lazyBundles {
+            for bundleId in bundleIds {
                 if Task.isCancelled { return }
                 // background スレッドで lookupInfo を呼んで NSCache を温める
                 // (戻り値の NSImage は MainActor 側で再 lookup して取り直すため捨てる)。
@@ -337,19 +343,15 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     /// 対象行の icon/name を差分 reload する。NSImage の Sendable を跨がせないために
     /// lookupInfo を 2 度呼ぶ (2 度目は cache hit で軽量)。
     private func applyLazyIcon(bundleId: String) {
-        guard let row = displayedApps.firstIndex(where: { $0.bundleId == bundleId }) else { return }
         let info = StatusBarApp.lookupInfo(bundleId: bundleId)
-        let old = displayedApps[row]
-        displayedApps[row] = DisplayedApp(
-            bundleId: old.bundleId,
-            name: info.name,
-            icon: info.icon,
-            isExcluded: old.isExcluded
-        )
-        appsTableView?.reloadData(
-            forRowIndexes: IndexSet(integer: row),
-            columnIndexes: IndexSet(integer: 0)
-        )
+        mutateDisplayedApp(bundleId: bundleId) { old in
+            DisplayedApp(
+                bundleId: old.bundleId,
+                name: info.name,
+                icon: info.icon,
+                isExcluded: old.isExcluded
+            )
+        }
     }
 
     /// ウィンドウ表示直前に store の最新値で UI を同期する。
@@ -376,18 +378,31 @@ final class PreferencesWindowController: NSWindowController, NSTableViewDataSour
     /// `displayedApps[row]` を真値で更新しないと cell view 再利用 (スクロール後の再描画) で
     /// 古い isExcluded が読まれる。
     private func updateRowExclusion(bundleId: String, isExcluded: Bool) {
+        mutateDisplayedApp(bundleId: bundleId) { old in
+            DisplayedApp(
+                bundleId: old.bundleId,
+                name: old.name,
+                icon: old.icon,
+                isExcluded: isExcluded
+            )
+        }
+    }
+
+    /// `displayedApps` の単一行を bundleId で探して `transform` で置き換え、その行だけ差分 reload する。
+    /// `updateRowExclusion` (除外切替) と `applyLazyIcon` (background fetch 完了) の
+    /// 共通骨格を集約する: 行探索 → 行置換 → reloadData(forRowIndexes:) の 3 ステップ。
+    private func mutateDisplayedApp(bundleId: String, transform: (DisplayedApp) -> DisplayedApp) {
         guard let row = displayedApps.firstIndex(where: { $0.bundleId == bundleId }) else { return }
-        let old = displayedApps[row]
-        displayedApps[row] = DisplayedApp(
-            bundleId: old.bundleId,
-            name: old.name,
-            icon: old.icon,
-            isExcluded: isExcluded
-        )
+        displayedApps[row] = transform(displayedApps[row])
         appsTableView?.reloadData(
             forRowIndexes: IndexSet(integer: row),
             columnIndexes: IndexSet(integer: 0)
         )
+    }
+
+    @objc private func handleWindowWillClose(_ notification: Notification) {
+        lazyIconTask?.cancel()
+        lazyIconTask = nil
     }
 
     @objc private func handleScanCompleted(_ notification: Notification) {

@@ -215,12 +215,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         // ホットキー再登録。差分判定は HotKeyManager.update 内部で行うので、無関係な通知 (symbol 変更等) でも安全に no-op。
         let hotKey = PreferencesStore.hotKey
         hotKeyManager?.update(keyCode: hotKey.keyCode, modifiers: hotKey.modifiers)
-        // 除外リスト (`AppExclusionStore`) 変更時に popover の表示を再フィルタで更新する。
-        // 環境設定ウィンドウから除外切り替え時、popover が開いていれば即時反映。
-        // 通常は環境設定がフォアグラウンドで popover は閉じているが、念のための復帰経路。
-        // scan は走らせない (除外切り替えに AX 走査は不要)。
-        // 通知には除外設定変更以外 (symbol/foldOnLaunch/launchAtLogin/hotKey) も乗ってくるが、
-        // recomputeVisibleApps 自体は filter のみで idempotent なので無関係な通知でも安全。
+        // 除外リスト変更時に popover の表示を再フィルタで更新する (scan は走らせない)。
+        // 通常は環境設定がフォアグラウンドで popover は閉じているが、開いていれば即時反映する。
+        // 他キー (symbol/foldOnLaunch/launchAtLogin/hotKey) からも通知が飛ぶが filter のみで idempotent。
         recomputeVisibleApps()
         if !isFolded, popover.isShown, let vc = popover.contentViewController as? KuraViewController {
             vc.setTargets(visibleApps)
