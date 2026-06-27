@@ -123,7 +123,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         // warmup scan を複数タイミングで kick。
         // AccessibilityPermission プロンプトに対応するため、ユーザーが許可するであろう
         // 時間帯に複数回試す。認可済み scan が一度成功したら以降はスキップ。
-        for delay in [0.5, 2.0, 5.0, 10.0] as [Double] {
+        // 初回 0.1s は権限許可済みユーザーの起動時 fold (foldOnLaunch) のラグ縮減用。
+        // 既起動アプリの NSStatusItem は applicationDidFinishLaunching の時点で
+        // 大半が AX 列挙可能、未完了分は 2/5/10s リトライで救う。
+        for delay in [0.1, 2.0, 5.0, 10.0] as [Double] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self = self, !self.didCompleteAuthorizedScan else { return }
                 self.startScan()
@@ -481,16 +484,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, FoldController, NSPopo
         //    折りたたみ前に確定させる必要がある（折りたたみ後だと AXPress も画面外で空振り）。
         // isCommittingFold = true で新規 scan kick を抑止し、scan task が差し替わる競合を防ぐ。
         isCommittingFold = true
+        let foldStart = DispatchTime.now()
+        let triggerLabel = silent ? "auto" : "manual"
         Task { @MainActor [weak self] in
             if let task = self?.scanTask {
                 _ = await task.value
             }
+            let layoutEnd = DispatchTime.now()
             var detailScansOk = true
             if let vc = self?.popover.contentViewController as? KuraViewController {
                 detailScansOk = await vc.waitForAllScansAndCheckSuccess()
             }
+            let detailEnd = DispatchTime.now()
             guard let self = self else { return }
             self.isCommittingFold = false
+            let layoutMs = Double(layoutEnd.uptimeNanoseconds - foldStart.uptimeNanoseconds) / 1_000_000
+            let detailMs = Double(detailEnd.uptimeNanoseconds - layoutEnd.uptimeNanoseconds) / 1_000_000
+            NSLog("[Kura] foldTiming %@ layout=%.0fms detail=%.0fms", triggerLabel, layoutMs, detailMs)
             // 最新の layout scan が .items かつ failedBundleIds が空（= 全アプリで scan 成功）の場合のみ
             // folded を許可。部分失敗 (failedBundleIds に bundleId が積まれている) では、その bundle が
             // 初回 scan なら cache 未確立で folded 後に操作不能になるため、ブロック。
