@@ -1,6 +1,10 @@
 #!/bin/bash
 # Release Kura.dmg — release ビルド + 作り込み dmg (背景画像 + アイコン配置固定) を組み立てる
 # 必要: macOS 14+, Xcode, Resources/dmg-background.png
+#
+# レイアウト同期メモ: 下記のアイコン位置 {140, 200} / {400, 200} は
+# Resources/dmg-background.svg (viewBox 540x380, 矢印 translate(270, 200)) を前提に
+# 決めている。SVG を編集した場合は WIN_WIDTH/HEIGHT および本スクリプトの position も同期更新すること。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -28,8 +32,17 @@ if [[ ! -f "$BACKGROUND" ]]; then
 fi
 
 # 2. staging ディレクトリ作成
+# trap で STAGING の削除と /Volumes/Kura の detach 両方をカバー
+# (osascript / hdiutil convert 失敗時に mount 残留して次回 release が衝突するのを防ぐ)
 STAGING=$(mktemp -d)
-trap 'rm -rf "$STAGING"' EXIT
+MOUNT_POINT="/Volumes/$VOLNAME"
+cleanup() {
+    rm -rf "$STAGING"
+    if [[ -d "$MOUNT_POINT" ]]; then
+        hdiutil detach "$MOUNT_POINT" > /dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT
 
 echo "==> assembling staging at $STAGING"
 cp -R "$APP" "$STAGING/"
@@ -45,7 +58,7 @@ hdiutil create -volname "$VOLNAME" -srcfolder "$STAGING" -ov -format UDRW "$TMP_
 # 4. マウントして Finder ウィンドウのレイアウトを焼き込む
 # -nobrowse だと Finder が disk を認識しないため AppleScript の `tell disk "Kura"` が -1728 で失敗する。
 # 代わりに /Volumes/Kura に固定マウント + -noautoopen で Finder window auto-open だけ抑制する。
-MOUNT_POINT="/Volumes/$VOLNAME"
+# (MOUNT_POINT は Section 2 の cleanup() で定義済み)
 if [[ -d "$MOUNT_POINT" ]]; then
     echo "==> detaching existing $MOUNT_POINT"
     hdiutil detach "$MOUNT_POINT" > /dev/null 2>&1 || true

@@ -20,7 +20,6 @@ xcuserdata/
 
 # Release artifacts (release.sh で生成、GitHub Release にアップロード)
 *.dmg
-.tmp-kura.dmg
 
 # macOS
 .DS_Store
