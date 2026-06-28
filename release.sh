@@ -82,6 +82,7 @@ tell application "Finder"
         set background picture of viewOptions to file ".background:dmg-background.png"
         set position of item "$APP" of container window to {140, 200}
         set position of item "Applications" of container window to {400, 200}
+        -- close + open 二重で .DS_Store にレイアウトを確実に焼き込む (片方だけだと反映漏れあり、典型的な dmg 作成パターン)
         close
         open
         update without registering applications
