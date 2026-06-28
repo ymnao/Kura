@@ -7,7 +7,7 @@ cd "$ROOT"
 
 CONFIG="${1:-release}"
 APP="Kura.app"
-BUNDLE_ID="local.kura.app"
+BUNDLE_ID="io.github.ymnao.kura"
 APP_EXEC="$ROOT/$APP/Contents/MacOS/Kura"
 
 # 既存プロセスを停止（codesign 中の差し替えと、新バイナリでの AX 権限プロンプトのため）。
