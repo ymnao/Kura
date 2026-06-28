@@ -18,6 +18,9 @@ xcuserdata/
 # App bundles (local ad-hoc builds)
 *.app/
 
+# Release artifacts (release.sh で生成、GitHub Release にアップロード)
+*.dmg
+
 # macOS
 .DS_Store
 .AppleDouble
@@ -43,3 +46,4 @@ Icon
 
 # AI agent local state
 .serena/
+HANDOFF.md
