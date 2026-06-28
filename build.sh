@@ -40,6 +40,7 @@ mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 cp "$BIN_PATH" "$APP/Contents/MacOS/Kura"
 cp "Resources/Info.plist" "$APP/Contents/Info.plist"
+cp "Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 echo "==> ad-hoc codesign"
 # ad-hoc 署名では CDHash が毎ビルド変わるため、--identifier だけでは TCC は「同じアプリ」と
