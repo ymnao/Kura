@@ -18,7 +18,7 @@
 - **対象アプリ除外リスト** — 環境設定の「対象アプリ」タブで、蔵で管理したくないアプリをチェックボックスで除外
 - **起動時 fold 状態** — 起動時に自動で折りたたんだ状態にする設定
 - **Mac 起動時自動起動** — `SMAppService` 経由でログイン時に Kura を起動
-- **蔵アイコン symbol 選択** — `archivebox` / `tray` / `shippingbox` / `square.stack` / `bubbles.and.sparkles` から選択。`bubbles` は『カグラバチ』の神薙の泡モチーフ
+- **蔵アイコン symbol 選択** — `archivebox` / `tray` / `shippingbox` / `square.stack` / `bubbles.and.sparkles` から選択。`bubbles` は『カグラバチ』で蔵に物を出し入れする際の泡エフェクトをイメージ
 
 ### 必要権限
 
