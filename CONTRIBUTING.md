@@ -13,6 +13,12 @@ swift build           # debug
 swift run             # 直接実行（.app を介さない）
 ```
 
+## 停止
+
+```bash
+pkill Kura
+```
+
 ## ブランチ運用
 
 - `main`: 安定版（直接コミット禁止）
